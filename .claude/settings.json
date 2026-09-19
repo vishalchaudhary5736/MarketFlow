@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.local)",
+      "Read(./.env.development.local)",
+      "Read(./.env.test.local)",
+      "Read(./.env.production.local)",
+      "Read(//home/vishal/Desktop/E_commerce/e_backend/.env)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.command' | sed 's/\\.env\\.example//g' | grep -q '\\.env' && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Project policy: .env holds live credentials and is off-limits to Claude. Use .env.example instead, or run the command yourself.\"}}' || true"
+          }
+        ]
+      }
+    ]
+  }
+}

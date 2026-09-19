@@ -9,4 +9,5 @@ coverage
 *.md
 .vscode
 .idea
+.claude
 npm-debug.log*
