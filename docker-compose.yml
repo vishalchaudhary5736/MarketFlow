@@ -1,0 +1,119 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT}:${REDIS_PORT}"
+    volumes:
+      - redis-data:/data
+    networks:
+      - ecommerce-net
+
+  api-gateway:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: api-gateway
+    env_file: .env
+    ports:
+      - "${API_GATEWAY_PORT}:${API_GATEWAY_PORT}"
+    networks:
+      - ecommerce-net
+
+  auth-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: auth-service
+    env_file: .env
+    ports:
+      - "${AUTH_SERVICE_PORT}:${AUTH_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+  cart-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: cart-service
+    env_file: .env
+    ports:
+      - "${CART_SERVICE_PORT}:${CART_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+  catalog-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: catalog-service
+    env_file: .env
+    environment:
+      REDIS_HOST: redis
+    depends_on:
+      - redis
+    ports:
+      - "${CATALOG_SERVICE_PORT}:${CATALOG_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+  inventory-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: inventory-service
+    env_file: .env
+    ports:
+      - "${INVENTORY_SERVICE_PORT}:${INVENTORY_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+  notification-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: notification-service
+    env_file: .env
+    ports:
+      - "${NOTIFICATION_SERVICE_PORT}:${NOTIFICATION_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+  order-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: order-service
+    env_file: .env
+    ports:
+      - "${ORDER_SERVICE_PORT}:${ORDER_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+  payment-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: payment-service
+    env_file: .env
+    ports:
+      - "${PAYMENT_SERVICE_PORT}:${PAYMENT_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+  analytics-service:
+    build:
+      context: .
+      args:
+        SERVICE_NAME: analytics-service
+    env_file: .env
+    ports:
+      - "${ANALYTICS_SERVICE_PORT}:${ANALYTICS_SERVICE_PORT}"
+    networks:
+      - ecommerce-net
+
+networks:
+  ecommerce-net:
+    driver: bridge
+
+volumes:
+  redis-data:
