@@ -1,47 +1,51 @@
-# syntax=docker/dockerfile:1
 
-# One template builds every service. docker-compose passes a different
-# SERVICE_NAME build arg per service; nothing else here is service-specific.
-#
-# SERVICE_NAME is declared as late as possible in each stage on purpose: every
-# layer above it is byte-identical across all services, so BuildKit computes the
-# npm installs and `prisma generate` once and shares the result. Declaring it
-# earlier makes each service build its own copy, which means nine concurrent
-# Prisma engine downloads and DNS failures.
-
-# ---- Base: shared layer every stage builds on ----
 FROM node:22-alpine AS base
 WORKDIR /usr/src/app
+
+ENV PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1
 COPY package.json package-lock.json ./
 
-# ---- Dependencies: full deps (incl. devDependencies) needed to compile ----
 FROM base AS dependencies
 RUN npm ci
 
-# ---- Build: compile the one service this image is for ----
+COPY prisma ./prisma
+COPY prisma.config.ts ./
+RUN DATABASE_URL="postgresql://placeholder:placeholder@localhost:5432/placeholder" npx prisma generate
+
+# ---- Development: hot reload, used by docker-compose.dev.yml ----
+# No source is COPYed in — docker-compose.dev.yml bind-mounts the host's
+# working tree over /usr/src/app, so edits on the host are visible instantly.
+# Keeps devDependencies (it builds on `dependencies`) because the Nest CLI and
+# TypeScript have to run inside the container.
+FROM dependencies AS development
+ARG SERVICE_NAME
+ENV SERVICE_NAME=${SERVICE_NAME}
+ENV NODE_ENV=development
+# Bind mounts on Docker Desktop do not reliably forward inotify events to the
+# VM, so the watcher polls instead. Without this, edits are silently ignored.
+ENV WATCHPACK_POLLING=true
+ENV CHOKIDAR_USEPOLLING=true
+CMD ["sh", "-c", "npx nest start ${SERVICE_NAME} --watch"]
+
+# ---- Runtime deps: strip devDependencies, offline ----
+FROM dependencies AS runtime-deps
+RUN npm prune --omit=dev
+
 FROM dependencies AS build
 COPY . .
-# `prisma generate` only reads the schema to emit TypeScript — it never opens a
-# connection and needs no database URL.
-RUN npx prisma generate
 ARG SERVICE_NAME
 RUN npx nest build ${SERVICE_NAME}
 
-# ---- Prod deps: runtime dependencies only, shared by every service ----
-FROM base AS prod-deps
-# The schema must land before `npm ci`, because @prisma/client's postinstall
-# looks for it, and before `generate`, which reads it.
-COPY prisma ./prisma
-RUN npm ci --omit=dev
-RUN npx prisma generate
-
 # ---- Production: lean runtime image, no dev tools, no source ----
-FROM prod-deps AS production
+FROM base AS production
 ARG SERVICE_NAME
 ENV SERVICE_NAME=${SERVICE_NAME}
 ENV NODE_ENV=production
+COPY --from=runtime-deps /usr/src/app/node_modules ./node_modules
+COPY --from=runtime-deps /usr/src/app/prisma ./prisma
+
+COPY --from=runtime-deps /usr/src/app/prisma.config.ts ./
 COPY --from=build /usr/src/app/dist ./dist
 
-# The real DATABASE_URL is injected at runtime by compose (env_file), never
-# baked into the image.
+# The real DATABASE_URL is injected at runtime by compose, never baked in.
 CMD ["sh", "-c", "node dist/apps/${SERVICE_NAME}/main.js"]

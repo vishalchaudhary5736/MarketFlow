@@ -1,13 +1,13 @@
-//npx prisma generate 
-//npx prisma migrate dev --name update_user_fields
+// Connection URL lives in prisma.config.ts (Prisma 7); the client itself gets
+// its connection from the driver adapter in PrismaService.
 
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client"
+  output   = "../generated/prisma"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 enum UserRole {

@@ -1,0 +1,97 @@
+# Development overlay: hot reload instead of a compiled image.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# Each service builds the `development` stage and bind-mounts the host working
+# tree, so `nest start --watch` rebuilds and restarts on every save. No image
+# rebuild is needed for a code change.
+#
+# The two volume entries matter in this order:
+#   .:/usr/src/app            host source shadows the image's copy
+#   /usr/src/app/node_modules anonymous volume preserving the CONTAINER's
+#                             node_modules, which holds Linux-native binaries
+#                             (the Prisma engine, bcrypt). Without this second
+#                             line the host's node_modules wins and the service
+#                             crashes on a platform mismatch.
+
+services:
+  api-gateway:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${API_GATEWAY_PORT}:${API_GATEWAY_PORT}"
+
+  auth-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${AUTH_SERVICE_PORT}:${AUTH_SERVICE_PORT}"
+
+  cart-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${CART_SERVICE_PORT}:${CART_SERVICE_PORT}"
+
+  catalog-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${CATALOG_SERVICE_PORT}:${CATALOG_SERVICE_PORT}"
+
+  inventory-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${INVENTORY_SERVICE_PORT}:${INVENTORY_SERVICE_PORT}"
+
+  notification-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${NOTIFICATION_SERVICE_PORT}:${NOTIFICATION_SERVICE_PORT}"
+
+  order-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${ORDER_SERVICE_PORT}:${ORDER_SERVICE_PORT}"
+
+  payment-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${PAYMENT_SERVICE_PORT}:${PAYMENT_SERVICE_PORT}"
+
+  analytics-service:
+    build:
+      target: development
+    volumes:
+      - .:/usr/src/app
+      - /usr/src/app/node_modules
+    ports:
+      - "${ANALYTICS_SERVICE_PORT}:${ANALYTICS_SERVICE_PORT}"

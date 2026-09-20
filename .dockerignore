@@ -11,3 +11,6 @@ coverage
 .idea
 .claude
 npm-debug.log*
+
+# Regenerated inside the image by `prisma generate`.
+generated

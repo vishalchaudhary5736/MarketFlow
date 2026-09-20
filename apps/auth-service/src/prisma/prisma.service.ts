@@ -4,7 +4,8 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { PrismaClient } from '../../../../generated/prisma/client';
 
 @Injectable()
 export class PrismaService
@@ -13,6 +14,16 @@ export class PrismaService
 {
   private readonly logger = new Logger(PrismaService.name);
 
+  // Prisma 7 connects through a driver adapter rather than reading `url` from
+  // schema.prisma. The adapter owns the pg connection pool.
+  constructor() {
+    super({
+      adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
+    });
+  }
+
+  // Not part of the NestJS recipe, but kept: Neon suspends idle instances and
+  // the first connection after a cold start routinely fails.
   async onModuleInit() {
     const maxAttempts = 5;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {

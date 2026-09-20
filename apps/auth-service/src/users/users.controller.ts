@@ -10,7 +10,8 @@ import {
 } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
-import { PublicUser, UsersService } from './users.service';
+import { UsersService } from './users.service';
+import { PublicUser } from '../shared/shared.types';
 
 @Controller('users')
 export class UsersController {
