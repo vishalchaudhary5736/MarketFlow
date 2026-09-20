@@ -19,3 +19,6 @@ export interface AuthTokens {
 export interface AuthResult extends AuthTokens {
   user: PublicUser;
 }
+
+export type UserTableTypes = User
+

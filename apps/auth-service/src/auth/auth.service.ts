@@ -1,19 +1,39 @@
 import {
-  BadGatewayException,
   BadRequestException,
   ConflictException,
   ForbiddenException,
   GoneException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   NotFoundException,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { User, UserStatus } from '../../../../generated/prisma/client';
+import {
+  User,
+  UserRole,
+  UserStatus,
+} from '../../../../generated/prisma/client';
 import { CustomerRegisterDto } from './dto/customer-register.dto';
 import { OTP_TYPE } from './constants.service';
 import { SharedService } from '../shared/shared.service';
-import { AuthTokens, JwtPayload, PublicUser } from '../shared/shared.types';
+import {
+  AuthTokens,
+  JwtPayload,
+  PublicUser,
+  UserTableTypes,
+} from '../shared/shared.types';
+import { randomBytes } from 'crypto';
+import { VerifyOtpDto } from './dto/verify-otp.dto';
+import { LoginDto } from './dto/login.dto';
+
+// Five wrong passwords lock the account for fifteen minutes. The counter and
+// the deadline live on the user row (`failedLoginAttempts`, `lockedUntil`) so a
+// lockout survives a cache flush or a service restart.
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+const LOGIN_LOCK_DURATION_MS = 15 * 60 * 1000;
 
 @Injectable()
 export class AuthService {
@@ -28,8 +48,6 @@ export class AuthService {
     private readonly jwt: JwtService,
   ) {}
 
-  // role defaults to CUSTOMER and status to INACTIVE at the schema level,
-  // so a new account exists but cannot sign in until it is verified.
   async registerCustomer({
     email,
     password,
@@ -142,7 +160,7 @@ export class AuthService {
         where: { email },
         select: {
           email: true,
-          id:true,
+          id: true,
           phone: true,
           status: true,
           isEmailVerified: true,
@@ -150,7 +168,13 @@ export class AuthService {
       });
 
       if (!isExistUser) {
-        throw new BadGatewayException('Email not configured with any account!');
+        // 404, not 502: nothing failed upstream, the address is simply
+        // not registered — and the client's next step is to sign up.
+        throw new NotFoundException({
+          code: 'ACCOUNT_NOT_FOUND',
+          message: 'No account is registered with this email address.',
+          action: 'SIGN_UP',
+        });
       } else {
         switch (isExistUser.status) {
           case UserStatus.BLOCKED:
@@ -180,11 +204,11 @@ export class AuthService {
 
       // TO - DO
       if (this.BY_PASS_EMAIL_VERIFICATION === 'false') {
-         const otp = await this.sharedService.generateOtp(
-        OTP_TYPE.EMAIL_VERIFICATION,
-        isExistUser.id,
-      );
-      this.logger.debug(`OTP for ${isExistUser.email}: ${otp}`);
+        const otp = await this.sharedService.generateOtp(
+          OTP_TYPE.EMAIL_VERIFICATION,
+          isExistUser.id,
+        );
+        this.logger.debug(`OTP for ${isExistUser.email}: ${otp}`);
       }
 
       switch (otpType) {
@@ -212,27 +236,16 @@ export class AuthService {
     }
   }
 
-  async verifyOtp({
-    otpType,
-    email,
-    otp,
-  }: {
-    otpType: OTP_TYPE;
-    email: string;
-    otp: string;
-  }) {
+  async verifyOtp(
+    { otpType, email, otp }: VerifyOtpDto,
+    userAgent: string | undefined,
+  ) {
     email = email.trim().toLowerCase();
     otp = otp.trim();
 
     const user = await this.sharedService.prisma.user.findUnique({
       where: { email },
-      select: {
-        email: true,
-        id:true,
-        status: true,
-        isEmailVerified: true,
-        phoneVerifiedAt: true,
-      },
+      omit: { passwordHash: true },
     });
 
     if (!user) {
@@ -246,7 +259,7 @@ export class AuthService {
     this.sharedService.assertAccountIsUsable(user.status);
 
     if (this.isAlreadyVerified(otpType, user)) {
-      return this.verificationSucceeded(otpType, user.email, true);
+      return this.verificationSucceeded(otpType, user, true);
     }
 
     if (this.BY_PASS_EMAIL_VERIFICATION !== 'true') {
@@ -256,15 +269,204 @@ export class AuthService {
     const applied = await this.markVerified(otpType, user.email);
 
     if (!applied) {
-      return this.verificationSucceeded(otpType, user.id, true);
+      return this.verificationSucceeded(otpType, user, true);
     }
 
-    // Single use: burn the code so it cannot be replayed.
     await this.sharedService.deleteOtp(otpType, user.id);
 
     this.logger.log(`Verified ${otpType} for ${user.email}`);
 
-    return this.verificationSucceeded(otpType, user.email, false);
+    const { accessToken, refreshToken } = await this.startSession(
+      user,
+      userAgent,
+    );
+
+    return this.verificationSucceeded(
+      otpType,
+      user,
+      false,
+      accessToken,
+      refreshToken,
+    );
+  }
+
+  async login({ email, password }: LoginDto, userAgent: string | undefined) {
+    email = email.trim().toLowerCase();
+
+    // The whole row, unlike every other read in this file: the password
+    // comparison needs `passwordHash`. It never leaves this method — the row
+    // that goes back to the client comes from the `omit`ted update below.
+    const user = await this.sharedService.prisma.user.findUnique({
+      where: { email },
+    });
+
+    // An unknown address and a wrong password answer identically, so this
+    // endpoint cannot be used to discover which addresses are registered.
+    if (!user) {
+      throw this.invalidCredentials();
+    }
+
+    this.sharedService.assertAccountIsUsable(user.status);
+    this.assertNotLockedOut(user.lockedUntil);
+
+    const passwordMatches = await this.sharedService.comparePassword(
+      password,
+      user.passwordHash,
+    );
+
+    if (!passwordMatches) {
+      const lockedUntil = await this.recordFailedLogin(
+        user.id,
+        user.failedLoginAttempts,
+      );
+
+      // The attempt that trips the lock says so. Staying generic here would
+      // leave the next attempt rejected for a reason the client cannot explain.
+      if (lockedUntil) {
+        this.logger.warn(
+          `Login locked for ${user.email} until ${lockedUntil.toISOString()}`,
+        );
+        this.assertNotLockedOut(lockedUntil);
+      }
+
+      throw this.invalidCredentials();
+    }
+
+    if (!user.isEmailVerified && this.BY_PASS_EMAIL_VERIFICATION !== 'true') {
+      // The credentials were right, so this is not a 401 — the account is real
+      // and simply not usable yet. Re-issue a code unless one is still live, so
+      // the client can send the person straight to the OTP screen.
+      const existingOtp = await this.sharedService.getOtpHash(
+        OTP_TYPE.EMAIL_VERIFICATION,
+        user.id,
+      );
+
+      if (!existingOtp) {
+        const otp = await this.sharedService.generateOtp(
+          OTP_TYPE.EMAIL_VERIFICATION,
+          user.id,
+        );
+        this.logger.debug(`OTP for ${user.email}: ${otp}`);
+      }
+
+      throw new ForbiddenException({
+        code: 'EMAIL_NOT_VERIFIED',
+        message:
+          'Verify your email address before signing in. We have sent you a code.',
+        action: 'VERIFY_EMAIL',
+        email: user.email,
+      });
+    }
+
+    // A successful sign-in clears the budget: the five attempts are five in a
+    // row, not five ever. The updated row is also what the client gets back,
+    // so `lastLoginAt` is already fresh and no second read is needed.
+    const publicUser = await this.sharedService.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        failedLoginAttempts: 0,
+        lockedUntil: null,
+        lastLoginAt: new Date(),
+      },
+      omit: { passwordHash: true },
+    });
+
+    const { accessToken, refreshToken } = await this.startSession(
+      publicUser,
+      userAgent,
+    );
+
+    this.logger.log(`Login succeeded for ${user.email}`);
+
+    return {
+      success: true,
+      message: 'Signed in successfully.',
+      data: {
+        userDetail: publicUser,
+        accessToken,
+        refreshToken,
+        nextStep: 'Home',
+      },
+    };
+  }
+
+  /** 401 for both a missing account and a wrong password — deliberately identical. */
+  private invalidCredentials(): UnauthorizedException {
+    return new UnauthorizedException({
+      code: 'INVALID_CREDENTIALS',
+      message: 'That email address and password do not match.',
+      action: 'RETRY',
+    });
+  }
+
+  private assertNotLockedOut(lockedUntil: Date | null): void {
+    if (!lockedUntil || lockedUntil.getTime() <= Date.now()) {
+      return;
+    }
+
+    const retryAfterSeconds = Math.ceil(
+      (lockedUntil.getTime() - Date.now()) / 1000,
+    );
+
+    // 423 Locked: the credentials are not being judged at all, the account is
+    // temporarily closed to sign-in attempts.
+    throw new HttpException(
+      {
+        code: 'ACCOUNT_LOCKED',
+        message: `Too many failed sign-in attempts. Try again in ${Math.ceil(retryAfterSeconds / 60)} minute(s).`,
+        action: 'RETRY_LATER',
+        retryAfterSeconds,
+      },
+      HttpStatus.LOCKED,
+    );
+  }
+
+  /** Returns the new lock deadline when this attempt tripped the limit. */
+  private async recordFailedLogin(
+    userId: string,
+    failedLoginAttempts: number,
+  ): Promise<Date | null> {
+    const attempts = failedLoginAttempts + 1;
+    const shouldLock = attempts >= MAX_FAILED_LOGIN_ATTEMPTS;
+    const lockedUntil = shouldLock
+      ? new Date(Date.now() + LOGIN_LOCK_DURATION_MS)
+      : null;
+
+    await this.sharedService.prisma.user.update({
+      where: { id: userId },
+      data: {
+        // Zeroed on lock so the wait buys a fresh budget rather than one
+        // attempt that re-locks immediately.
+        failedLoginAttempts: shouldLock ? 0 : attempts,
+        ...(shouldLock ? { lockedUntil } : {}),
+      },
+    });
+
+    return lockedUntil;
+  }
+
+  /**
+   * Mints a session id, signs the token pair against it, and caches the
+   * session. Every entry point that hands out tokens goes through here, so a
+   * session always exists for a token that was issued.
+   */
+  private async startSession(
+    user: { id: string; email: string; role: UserRole },
+    userAgent: string | undefined,
+  ): Promise<AuthTokens> {
+    const sessionId = randomBytes(16).toString('base64url');
+
+    const tokens = await this.issueTokens(user, sessionId);
+
+    await this.sharedService.cacheSession({
+      sessionId,
+      userId: user.id,
+      token: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      userAgent: userAgent ?? null,
+    });
+
+    return tokens;
   }
 
   private isAlreadyVerified(
@@ -276,9 +478,6 @@ export class AuthService {
       : user.phoneVerifiedAt !== null;
   }
 
-  // updateMany rather than update: the precondition sits in the WHERE clause,
-  // so checking and writing are a single atomic statement. Two requests
-  // carrying the same code cannot both come back as the one that verified.
   private async markVerified(
     otpType: OTP_TYPE,
     email: string,
@@ -299,8 +498,10 @@ export class AuthService {
 
   private verificationSucceeded(
     otpType: OTP_TYPE,
-    email: string,
+    user: PublicUser,
     alreadyDone: boolean,
+    accessToken?: string,
+    refreshToken?: string,
   ) {
     const subject =
       otpType === OTP_TYPE.EMAIL_VERIFICATION
@@ -311,14 +512,13 @@ export class AuthService {
       success: true,
       message: alreadyDone
         ? `${subject} is already verified. You can sign in.`
-        : `${subject} verified successfully. You can now sign in.`,
-      data: { email, nextStep: 'LOGIN' },
+        : `${subject} verified successfully.`,
+      data: alreadyDone
+        ? { nextStep: 'Login' }
+        : { userDetail: user, accessToken, refreshToken, nextStep: 'Home' },
     };
   }
 
-  // Every rejection carries a stable `code` the client switches on, a `message`
-  // that tells the person what to do next, and an `action` naming the button to
-  // offer them. Wording can then change freely without breaking the frontend.
   private rejectExistingAccount(
     existing: Pick<User, 'email' | 'phone' | 'status'>,
     email: string,
@@ -349,10 +549,8 @@ export class AuthService {
     });
   }
 
-  // Signed with two different secrets so a leaked access token can never be
-  // replayed against the refresh endpoint to mint a fresh pair.
   private async issueTokens(
-    user: PublicUser,
+    user: { email: string; id: string; role: UserRole },
     sessionId: string,
   ): Promise<AuthTokens> {
     const payload: JwtPayload = {

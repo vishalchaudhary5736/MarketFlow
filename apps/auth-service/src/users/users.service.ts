@@ -39,7 +39,14 @@ export class UsersService {
       where: { id, deletedAt: null },
       omit: { passwordHash: true },
     });
-    if (!user) throw new NotFoundException(`User ${id} not found`);
+    if (!user) {
+      throw new NotFoundException({
+        code: 'USER_NOT_FOUND',
+        message: 'No user exists with this id.',
+        action: 'RETRY',
+        userId: id,
+      });
+    }
     return user;
   }
 

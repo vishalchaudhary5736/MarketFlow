@@ -39,7 +39,7 @@ export class SharedService {
     refreshToken,
     userAgent,
   }: {
-    userAgent: string;
+    userAgent?: string | null;
     sessionId: string;
     userId: string;
     token: string;
