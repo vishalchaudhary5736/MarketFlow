@@ -25,6 +25,11 @@ ENV NODE_ENV=development
 # VM, so the watcher polls instead. Without this, edits are silently ignored.
 ENV WATCHPACK_POLLING=true
 ENV CHOKIDAR_USEPOLLING=true
+# chokidar 4 spreads the caller's options over its own defaults, and the Nest
+# CLI passes `interval: undefined` — which wipes out the default of 100 and
+# makes fs.watchFile throw ERR_INVALID_ARG_TYPE the moment polling is on.
+# CHOKIDAR_INTERVAL is applied after that spread, so it puts a number back.
+ENV CHOKIDAR_INTERVAL=1000
 CMD ["sh", "-c", "npx nest start ${SERVICE_NAME} --watch"]
 
 # ---- Runtime deps: strip devDependencies, offline ----

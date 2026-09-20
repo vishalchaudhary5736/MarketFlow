@@ -17,15 +17,26 @@ import { Prisma, UserStatus } from '../../../../generated/prisma/client';
 import { OTP_TYPE } from '../auth/constants.service';
 import { PrismaService } from '../prisma/prisma.service';
 
+export interface CachedSession {
+  sessionId: string;
+  userId: string;
+  tokenHash: string;
+  refreshTokenHash: string;
+  userAgent: string | null;
+  createdAt: string;
+}
+
 const OTP_TTL_MS = 5 * 60 * 1000;
 const OTP_LENGTH = 4;
 const BCRYPT_ROUNDS = 12;
 const MAX_OTP_ATTEMPTS = 5;
+const OTP_ATTEMPTS_TTL_MS = 15 * 60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 5*60 * 1000;
 
 @Injectable()
 export class SharedService {
   private readonly logger = new Logger(SharedService.name);
-  private readonly sessionTTL = 7 * 24 * 60 * 60; // 7 days in seconds
+  private readonly sessionTTL = 7 * 24 * 60 * 60 * 1000;
 
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheService: Cache,
@@ -45,19 +56,79 @@ export class SharedService {
     token: string;
     refreshToken: string;
   }) {
-    const session = {
-      sessionId: sessionId,
-      userId: userId,
+    const session: CachedSession = {
+      sessionId,
+      userId,
       tokenHash: token,
       refreshTokenHash: refreshToken,
-      userAgent: userAgent,
+      userAgent: userAgent ?? null,
       createdAt: new Date().toISOString(),
     };
-    await this.cacheService.set(`session:${userId}`, session, this.sessionTTL);
+
+    await this.cacheService.set(
+      this.sessionKey(sessionId),
+      session,
+      this.sessionTTL,
+    );
+
+    const sessionIds = await this.getUserSessionIds(userId);
+
+    if (!sessionIds.includes(sessionId)) {
+      await this.cacheService.set(
+        this.userSessionsKey(userId),
+        [...sessionIds, sessionId],
+        this.sessionTTL,
+      );
+    }
   }
 
-  async getSession(userId: string) {
-    return await this.cacheService.get(`session:${userId}`);
+  async getSession(sessionId: string): Promise<CachedSession | null> {
+    return (
+      (await this.cacheService.get<CachedSession>(
+        this.sessionKey(sessionId),
+      )) ?? null
+    );
+  }
+
+  async getUserSessionIds(userId: string): Promise<string[]> {
+    return (
+      (await this.cacheService.get<string[]>(this.userSessionsKey(userId))) ??
+      []
+    );
+  }
+
+  /** Ends one session — a single sign-out, or one device revoked. */
+  async deleteSession(sessionId: string, userId: string) {
+    await this.cacheService.del(this.sessionKey(sessionId));
+
+    const remaining = (await this.getUserSessionIds(userId)).filter(
+      (id) => id !== sessionId,
+    );
+
+    await this.cacheService.set(
+      this.userSessionsKey(userId),
+      remaining,
+      this.sessionTTL,
+    );
+  }
+
+  /** Ends every session for a user — password change, "sign out everywhere". */
+  async deleteAllUserSessions(userId: string) {
+    const sessionIds = await this.getUserSessionIds(userId);
+
+    await Promise.all(
+      sessionIds.map((id) => this.cacheService.del(this.sessionKey(id))),
+    );
+
+    await this.cacheService.del(this.userSessionsKey(userId));
+  }
+
+  private sessionKey(sessionId: string): string {
+    return `session:${sessionId}`;
+  }
+
+  private userSessionsKey(userId: string): string {
+    return `user-sessions:${userId}`;
   }
 
   async generateOtp(otpType: OTP_TYPE, identifier: string): Promise<string> {
@@ -77,7 +148,27 @@ export class SharedService {
       otpHash,
       OTP_TTL_MS,
     );
-    await this.cacheService.del(this.otpAttemptsKey(otpType, identifier));
+    await this.cacheService.set(
+      this.otpResendCooldownKey(otpType, identifier),
+      Date.now() + OTP_RESEND_COOLDOWN_MS,
+      OTP_RESEND_COOLDOWN_MS,
+    );
+  }
+
+ 
+  async otpResendCooldownRemaining(
+    otpType: OTP_TYPE,
+    identifier: string,
+  ): Promise<number> {
+    const readyAt = await this.cacheService.get<number>(
+      this.otpResendCooldownKey(otpType, identifier),
+    );
+
+    if (!readyAt) {
+      return 0;
+    }
+
+    return Math.max(0, Math.ceil((readyAt - Date.now()) / 1000));
   }
 
   async getOtpHash(
@@ -94,6 +185,7 @@ export class SharedService {
     await Promise.all([
       this.cacheService.del(this.otpKey(otpType, identifier)),
       this.cacheService.del(this.otpAttemptsKey(otpType, identifier)),
+      this.cacheService.del(this.otpResendCooldownKey(otpType, identifier)),
     ]);
   }
 
@@ -104,8 +196,9 @@ export class SharedService {
   ): Promise<number> {
     const key = this.otpAttemptsKey(otpType, identifier);
     const attempts = ((await this.cacheService.get<number>(key)) ?? 0) + 1;
-    // Expires with the code itself, so the budget cannot outlive it.
-    await this.cacheService.set(key, attempts, OTP_TTL_MS);
+    // Outlives the code on purpose: a budget that died with each code would
+    // reset every time a new one was requested.
+    await this.cacheService.set(key, attempts, OTP_ATTEMPTS_TTL_MS);
     return attempts;
   }
 
@@ -117,6 +210,10 @@ export class SharedService {
 
   private otpAttemptsKey(otpType: OTP_TYPE, identifier: string): string {
     return `otp-attempts:${otpType}:${identifier}`;
+  }
+
+  private otpResendCooldownKey(otpType: OTP_TYPE, identifier: string): string {
+    return `otp-cooldown:${otpType}:${identifier}`;
   }
 
   // ---- Passwords ----------------------------------------------------------
@@ -211,7 +308,7 @@ export class SharedService {
       attemptsRemaining,
     });
   }
-  
+
   private otpMatches(otp: string, storedHash: string): boolean {
     const candidate = Buffer.from(this.hashOtp(otp), 'hex');
     const expected = Buffer.from(storedHash, 'hex');

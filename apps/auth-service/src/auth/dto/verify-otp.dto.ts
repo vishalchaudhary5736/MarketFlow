@@ -1,9 +1,9 @@
-import { IsEmail, IsEnum, IsString, Matches, MaxLength } from 'class-validator';
-import { OTP_TYPE } from '../constants.service';
+import { IsEmail, IsIn, IsString, Matches, MaxLength } from 'class-validator';
+import { OTP_TYPE, VERIFICATION_OTP_TYPES } from '../constants.service';
 
 export class VerifyOtpDto {
-  @IsEnum(OTP_TYPE, {
-    message: `otpType must be one of: ${Object.values(OTP_TYPE).join(', ')}`,
+  @IsIn(VERIFICATION_OTP_TYPES, {
+    message: `otpType must be one of: ${VERIFICATION_OTP_TYPES.join(', ')}`,
   })
   otpType: OTP_TYPE;
 

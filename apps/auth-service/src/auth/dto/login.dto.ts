@@ -1,14 +1,34 @@
-import { IsEmail, IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import {
+  IsNotEmpty,
+  IsString,
+  MaxLength,
+  ValidateBy,
+  ValidationOptions,
+} from 'class-validator';
+import { isEmailIdentifier, isPhoneIdentifier } from './identifier';
+
+/** Accepts an email address or an E.164 phone number, and nothing else. */
+function IsEmailOrPhone(validationOptions?: ValidationOptions) {
+  return ValidateBy(
+    {
+      name: 'isEmailOrPhone',
+      validator: {
+        validate: (value: unknown) =>
+          typeof value === 'string' &&
+          (isEmailIdentifier(value) || isPhoneIdentifier(value.trim())),
+        defaultMessage: () =>
+          'identifier must be an email address or a phone number in E.164 format',
+      },
+    },
+    validationOptions,
+  );
+}
 
 export class LoginDto {
-  @IsEmail()
+  @IsEmailOrPhone()
   @MaxLength(255)
-  email: string;
+  identifier: string;
 
-  // No MinLength here even though registration requires 8. Length rules belong
-  // to the password being *set*; enforcing them at sign-in would lock out any
-  // account created before the rule tightened, and a short password is already
-  // going to fail the hash comparison.
   @IsString()
   @IsNotEmpty()
   @MaxLength(128)
