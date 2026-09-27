@@ -17,21 +17,23 @@ import {
   UserStatus,
 } from '../../../../generated/prisma/client';
 import { CustomerRegisterDto } from './dto/customer-register.dto';
-import { OTP_TYPE } from './constants.service';
+import { NAVIGATION_SCREENS, OTP_TYPE } from './constants.service';
 import { SharedService } from '../shared/shared.service';
 import {
   AuthTokens,
   JwtPayload,
   PublicUser,
+  RefreshTokenPayload,
   UserTableTypes,
 } from '../shared/shared.types';
 import { randomBytes } from 'crypto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { LoginDto } from './dto/login.dto';
-import { isEmailIdentifier, phoneVariants } from './dto/identifier';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { VerifyResetOtpDto } from './dto/verify-reset-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { CheckEmailMobileDto } from './dto/checkEmailMobile.dto';
+import type { Response } from 'express';
 
 // Five wrong passwords lock the account for fifteen minutes. The counter and
 // the deadline live on the user row (`failedLoginAttempts`, `lockedUntil`) so a
@@ -39,41 +41,116 @@ import { ResetPasswordDto } from './dto/reset-password.dto';
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCK_DURATION_MS = 15 * 60 * 1000;
 
+// The refresh token lives in an httpOnly cookie scoped to /auth, so only the
+// refresh (and future logout) calls ever carry it. Setting and clearing must
+// use the same options, or the browser keeps the old cookie.
+const REFRESH_COOKIE = 'refreshToken';
+const REFRESH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // matches the JWT's 7d
+const refreshCookieOptions = () => ({
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'strict' as const,
+  path: '/auth',
+});
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly accessSecret = process.env.JWT_ACCESS_SECRET;
   private readonly refreshSecret = process.env.JWT_REFRESH_SECRET;
+  // Env vars are strings, so only the literal "true" enables the bypass;
+  // unset keeps the previous default (on).
   private readonly BY_PASS_EMAIL_VERIFICATION =
-    process.env.BY_PASS_EMAIL_VERIFICATION;
+    (process.env.BY_PASS_EMAIL_VERIFICATION ?? 'true') === 'true';
 
   constructor(
     private readonly sharedService: SharedService,
     private readonly jwt: JwtService,
   ) {}
 
+  async checkEmailMobile({
+    email,
+    mobileNumber,
+    countryCode,
+    role,
+  }: CheckEmailMobileDto) {
+    // The DTO guarantees email, or countryCode + mobileNumber together; both
+    // may be sent, in which case each is checked.
+    if (email) {
+      const emailTaken = await this.sharedService.prisma.user.findUnique({
+        where: { email_role: { email: email.trim().toLowerCase(), role } },
+        select: { id: true },
+      });
+      if (emailTaken) {
+        throw new ConflictException({
+          code: 'ACCOUNT_ALREADY_EXISTS',
+          message: 'Email already in use. Please enter another email address',
+          nextStep: 'RETRY',
+          field: 'email',
+        });
+      }
+    }
+
+    if (countryCode && mobileNumber) {
+      const mobileTaken = await this.sharedService.prisma.user.findUnique({
+        where: {
+          countryCode_mobileNumber_role: {
+            countryCode: countryCode.trim(),
+            mobileNumber: mobileNumber.trim(),
+            role,
+          },
+        },
+        select: { id: true },
+      });
+      if (mobileTaken) {
+        throw new ConflictException({
+          code: 'ACCOUNT_ALREADY_EXISTS',
+          message:
+            'Mobile number already in use. Please enter another mobile number',
+          nextStep: 'RETRY',
+          field: 'phone',
+        });
+      }
+    }
+
+    const checked =
+      email && countryCode && mobileNumber
+        ? 'Email and mobile number are'
+        : email
+          ? 'Email is'
+          : 'Mobile number is';
+
+    return { success: true, message: `${checked} available.`, data: null };
+  }
+
   async registerCustomer({
     email,
     password,
-    phone,
+    mobileNumber,
+    countryCode,
     ...rest
   }: CustomerRegisterDto): Promise<{
     success: boolean;
     message: string;
-    data: { email: string; nextStep: string };
+    data: {
+      email: string;
+      nextStep: string;
+      expiresInSeconds?: number;
+      resendAvailableInSeconds?: number;
+    };
   }> {
     let user: PublicUser;
     email = email.trim().toLowerCase();
-    phone = phone.trim();
+    mobileNumber = mobileNumber.trim();
+    countryCode = countryCode.trim();
 
     try {
-      // Both columns are unique across every role, so the lookup is not scoped
-      // to CUSTOMER: an address already taken by a seller still collides.
       const isExistUser = await this.sharedService.prisma.user.findFirst({
-        where: { OR: [{ email }, { phone }] },
+        where: { OR: [{ email }, { countryCode, mobileNumber }] },
         select: {
           email: true,
-          phone: true,
+          mobileNumber: true,
+          countryCode: true,
           status: true,
           id: true,
           isEmailVerified: true,
@@ -81,16 +158,26 @@ export class AuthService {
       });
 
       if (isExistUser) {
-        // TO DO: Send verification email with a link to the frontend that includes a
-        if (
-          this.BY_PASS_EMAIL_VERIFICATION !== 'true' &&
-          isExistUser.status === UserStatus.ACTIVE &&
-          !isExistUser.isEmailVerified
+        if (!isExistUser.isEmailVerified && this.BY_PASS_EMAIL_VERIFICATION) {
+          return {
+            success: true,
+            message: 'Please verify OTP!',
+            data: {
+              email,
+              nextStep: NAVIGATION_SCREENS.OTP_SCREEN_FOR_VERIFY_EMAIL,
+            },
+          };
+        } else if (
+          !isExistUser.isEmailVerified &&
+          !this.BY_PASS_EMAIL_VERIFICATION
         ) {
+          // first check is previous otp exist and valid.
           const isOtpExist = await this.sharedService.getOtpHash(
             OTP_TYPE.EMAIL_VERIFICATION,
             isExistUser.id,
           );
+
+          // IF PREVIOUS OTP NOT EXIST THEN CREATE NEW ONE
           if (!isOtpExist) {
             const otp = await this.sharedService.generateOtp(
               OTP_TYPE.EMAIL_VERIFICATION,
@@ -100,24 +187,23 @@ export class AuthService {
           }
           return {
             success: true,
-            message: 'Verification code sent to your email.',
-            data: { email: isExistUser.email, nextStep: 'VERIFY_EMAIL' },
+            message:
+              'Verification code sent to your email. Please verify your email address.',
+            data: {
+              email: isExistUser.email,
+              nextStep: NAVIGATION_SCREENS.OTP_SCREEN_FOR_VERIFY_EMAIL,
+              expiresInSeconds: 300,
+              resendAvailableInSeconds: 60,
+            },
           };
         }
 
-        if (
-          this.BY_PASS_EMAIL_VERIFICATION === 'true' &&
-          isExistUser.status === UserStatus.ACTIVE &&
-          !isExistUser.isEmailVerified
-        ) {
-          return {
-            success: true,
-            message: 'Please verify OTP!',
-            data: { email, nextStep: 'VERIFY_EMAIL' },
-          };
-        }
-
-        this.rejectExistingAccount(isExistUser, email, phone);
+        this.rejectExistingAccount(
+          isExistUser,
+          email,
+          mobileNumber,
+          countryCode,
+        );
       }
 
       const passwordHash = await this.sharedService.hashPassword(password);
@@ -126,7 +212,8 @@ export class AuthService {
         data: {
           ...rest,
           email,
-          phone,
+          mobileNumber,
+          countryCode,
           passwordHash,
           status: UserStatus.ACTIVE,
         },
@@ -136,7 +223,7 @@ export class AuthService {
       throw this.sharedService.translateKnownErrors(error);
     }
 
-    if (this.BY_PASS_EMAIL_VERIFICATION !== 'true') {
+    if (!this.BY_PASS_EMAIL_VERIFICATION) {
       const otp = await this.sharedService.generateOtp(
         OTP_TYPE.EMAIL_VERIFICATION,
         user.id,
@@ -146,11 +233,15 @@ export class AuthService {
 
     return {
       success: true,
-      message:
-        this.BY_PASS_EMAIL_VERIFICATION === 'true'
-          ? 'Account created successfully.'
-          : 'Account created successfully. Verification code sent to your email.',
-      data: { email: user.email, nextStep: 'VERIFY_EMAIL' },
+      message: this.BY_PASS_EMAIL_VERIFICATION
+        ? 'Account created successfully.'
+        : 'Account created successfully. Verification code sent to your email.',
+      data: {
+        email: user.email,
+        nextStep: NAVIGATION_SCREENS.OTP_SCREEN_FOR_VERIFY_EMAIL,
+        expiresInSeconds: 300,
+        resendAvailableInSeconds: 60,
+      },
     };
   }
 
@@ -165,7 +256,8 @@ export class AuthService {
         select: {
           email: true,
           id: true,
-          phone: true,
+          mobileNumber: true,
+          countryCode: true,
           status: true,
           isEmailVerified: true,
         },
@@ -177,7 +269,7 @@ export class AuthService {
         throw new NotFoundException({
           code: 'ACCOUNT_NOT_FOUND',
           message: 'No account is registered with this email address.',
-          action: 'SIGN_UP',
+          nextStep: 'SIGN_UP',
         });
       } else {
         switch (isExistUser.status) {
@@ -186,17 +278,20 @@ export class AuthService {
               code: 'ACCOUNT_SUSPENDED',
               message:
                 'This account has been suspended and cannot be used to sign up again. Contact our support team if you believe this is a mistake.',
-              action: 'CONTACT_SUPPORT',
+              nextStep: 'CONTACT_SUPPORT',
             });
           case UserStatus.DELETED:
             throw new GoneException({
               code: 'ACCOUNT_CLOSED',
               message:
                 'This account was closed. Reset your password to reopen it, or contact our support team to sign up with these details again.',
-              action: 'RESTORE_ACCOUNT',
+              nextStep: 'RESTORE_ACCOUNT',
             });
           case UserStatus.ACTIVE:
-            if (isExistUser.isEmailVerified) {
+            if (
+              isExistUser.isEmailVerified &&
+              otpType === OTP_TYPE.EMAIL_VERIFICATION
+            ) {
               return {
                 success: true,
                 message:
@@ -206,10 +301,9 @@ export class AuthService {
         }
       }
 
-      // TO - DO
-      if (this.BY_PASS_EMAIL_VERIFICATION === 'false') {
+      if (!this.BY_PASS_EMAIL_VERIFICATION) {
         const otp = await this.sharedService.generateOtp(
-          OTP_TYPE.EMAIL_VERIFICATION,
+          otpType,
           isExistUser.id,
         );
         this.logger.debug(`OTP for ${isExistUser.email}: ${otp}`);
@@ -219,20 +313,29 @@ export class AuthService {
         case OTP_TYPE.EMAIL_VERIFICATION:
           return {
             success: true,
-            message: 'Otp sent successfully',
-            data: { email: email, nextStep: 'VERIFY_EMAIL' },
+            message: 'Email verification code sent successfully',
+            data: {
+              email: email,
+              nextStep: NAVIGATION_SCREENS.OTP_SCREEN_FOR_VERIFY_EMAIL,
+            },
           };
         case OTP_TYPE.MOBILE_VERIFICATION:
           return {
             success: true,
             message: 'Otp sent successfully',
-            data: { email: email, nextStep: 'VERIFY_EMAIL' },
+            data: { email: email, nextStep: 'OTP_SCREEN' },
+          };
+        case OTP_TYPE.PASSWORD_RESET:
+          return {
+            success: true,
+            message: 'Password reset code sent successfully',
+            data: { email: email, nextStep: NAVIGATION_SCREENS.PASSWORD_RESET },
           };
         default:
           throw new BadRequestException({
             code: 'INVALID_OTP_TYPE',
             message: `otpType must be one of: ${Object.values(OTP_TYPE).join(', ')}`,
-            action: 'RETRY',
+            nextStep: 'RETRY',
           });
       }
     } catch (error) {
@@ -243,12 +346,13 @@ export class AuthService {
   async verifyOtp(
     { otpType, email, otp }: VerifyOtpDto,
     userAgent: string | undefined,
+    res: Response,
   ) {
     email = email.trim().toLowerCase();
     otp = otp.trim();
 
     const user = await this.sharedService.prisma.user.findUnique({
-      where: { email },
+      where: { email_role: { email, role: UserRole.CUSTOMER } },
       omit: { passwordHash: true },
     });
 
@@ -256,7 +360,7 @@ export class AuthService {
       throw new NotFoundException({
         code: 'ACCOUNT_NOT_FOUND',
         message: 'No account is registered with this email address.',
-        action: 'SIGN_UP',
+        nextStep: 'SIGN_UP',
       });
     }
 
@@ -266,7 +370,7 @@ export class AuthService {
       return this.verificationSucceeded(otpType, user, true);
     }
 
-    if (this.BY_PASS_EMAIL_VERIFICATION !== 'true') {
+    if (!this.BY_PASS_EMAIL_VERIFICATION) {
       await this.sharedService.assertOtpIsValid(otpType, user.id, otp);
     }
 
@@ -284,6 +388,8 @@ export class AuthService {
       user,
       userAgent,
     );
+
+    this.setRefreshCookie(res, refreshToken);
 
     return this.verificationSucceeded(
       otpType,
@@ -313,8 +419,9 @@ export class AuthService {
         {
           code: 'OTP_RESEND_COOLDOWN',
           message: `A code was already sent. Request another in ${cooldown} second(s).`,
-          action: 'RETRY_LATER',
-          retryAfterSeconds: cooldown,
+          nextStep: NAVIGATION_SCREENS.PASSWORD_RESET,
+          expiresInSeconds: 300,
+          retryAfterSeconds: 60,
         },
         HttpStatus.TOO_MANY_REQUESTS,
       );
@@ -333,7 +440,12 @@ export class AuthService {
     return {
       success: true,
       message: 'Password reset code sent to your email.',
-      data: { email: account.email, nextStep: 'VERIFY_RESET_OTP' },
+      data: {
+        email: account.email,
+        nextStep: NAVIGATION_SCREENS.PASSWORD_RESET,
+        expiresInSeconds: 300,
+        resendAvailableInSeconds: 60,
+      },
     };
   }
 
@@ -348,7 +460,7 @@ export class AuthService {
   async verifyPasswordResetOtp({ email, otp }: VerifyResetOtpDto) {
     const account = await this.findCustomerForPasswordReset(email);
 
-    if (this.BY_PASS_EMAIL_VERIFICATION !== 'true') {
+    if (!this.BY_PASS_EMAIL_VERIFICATION) {
       await this.sharedService.assertOtpIsValid(
         OTP_TYPE.PASSWORD_RESET,
         account.id,
@@ -367,7 +479,7 @@ export class AuthService {
   async resetPassword({ email, otp, newPassword }: ResetPasswordDto) {
     const account = await this.findCustomerForPasswordReset(email);
 
-    const otpWasChecked = this.BY_PASS_EMAIL_VERIFICATION !== 'true';
+    const otpWasChecked = !this.BY_PASS_EMAIL_VERIFICATION;
     if (otpWasChecked) {
       await this.sharedService.assertOtpIsValid(
         OTP_TYPE.PASSWORD_RESET,
@@ -385,7 +497,7 @@ export class AuthService {
       throw new BadRequestException({
         code: 'PASSWORD_REUSED',
         message: 'Your new password must be different from the current one.',
-        action: 'RETRY',
+        nextStep: 'RETRY',
       });
     }
 
@@ -395,12 +507,8 @@ export class AuthService {
       where: { id: account.id },
       data: {
         passwordHash,
-        // A reset is also the way out of a lockout: the account was locked to
-        // stop password guessing, and the password just changed.
         failedLoginAttempts: 0,
         lockedUntil: null,
-        // Reading a code sent to the address proves the address — but only
-        // when the code was actually checked.
         ...(otpWasChecked && !account.isEmailVerified
           ? { isEmailVerified: true, emailVerifiedAt: new Date() }
           : {}),
@@ -417,17 +525,11 @@ export class AuthService {
     return {
       success: true,
       message: 'Password updated successfully. Sign in with your new password.',
-      data: { email: account.email, nextStep: 'Login' },
+      data: { nextStep: NAVIGATION_SCREENS.LOGIN_SCREEN },
     };
   }
 
-  /**
-   * The account lookup all three reset steps start from. Scoped to CUSTOMER,
-   * matching the rest of this flow — staff and seller passwords are not reset
-   * through the storefront endpoints.
-   */
   private async findCustomerForPasswordReset(email: string): Promise<User> {
-
     const account = await this.sharedService.prisma.user.findFirst({
       where: { email: email.trim().toLowerCase(), role: UserRole.CUSTOMER },
     });
@@ -436,7 +538,7 @@ export class AuthService {
       throw new BadRequestException({
         code: 'ACCOUNT_NOT_EXISTS',
         message: `Account is not configured with this email.`,
-        action: 'FORGOT_PASSWORD',
+        nextStep: 'FORGOT_PASSWORD',
       });
     }
 
@@ -446,19 +548,32 @@ export class AuthService {
   }
 
   async login(
-    { identifier, password }: LoginDto,
+    { email, countryCode, mobileNumber, password }: LoginDto,
     userAgent: string | undefined,
+    res: Response,
   ) {
-    identifier = identifier.trim();
-
-    const byEmail = isEmailIdentifier(identifier);
-    const user = byEmail
+    // The DTO guarantees email, or countryCode + mobileNumber together.
+    const byEmail = !!email;
+    const user = email
       ? await this.sharedService.prisma.user.findUnique({
-          where: { email: identifier.toLowerCase() },
+          where: {
+            email_role: {
+              email: email.trim().toLowerCase(),
+              role: UserRole.CUSTOMER,
+            },
+          },
         })
-      : await this.sharedService.prisma.user.findFirst({
-          where: { phone: { in: phoneVariants(identifier) } },
-        });
+      : countryCode && mobileNumber
+        ? await this.sharedService.prisma.user.findUnique({
+            where: {
+              countryCode_mobileNumber_role: {
+                countryCode: countryCode.trim(),
+                mobileNumber: mobileNumber.trim(),
+                role: UserRole.CUSTOMER,
+              },
+            },
+          })
+        : null;
 
     if (!user) {
       throw this.invalidCredentials(byEmail);
@@ -485,14 +600,31 @@ export class AuthService {
       throw this.invalidCredentials(byEmail);
     }
 
-    if (this.BY_PASS_EMAIL_VERIFICATION !== 'true' && !user.isEmailVerified) {
+    console.log('user=>', user);
+    if (!this.BY_PASS_EMAIL_VERIFICATION && !user.isEmailVerified) {
       await this.sendEmailVerificationOtp(user.id, user.email);
       throw new ForbiddenException({
         code: 'EMAIL_NOT_VERIFIED',
         message:
           'Verify your email address to continue. We have sent a verification code to it.',
-        action: 'VERIFY_EMAIL',
+        nextStep: NAVIGATION_SCREENS.OTP_SCREEN_FOR_VERIFY_EMAIL,
         email: user.email,
+        expiresInSeconds: 300,
+        resendAvailableInSeconds: 60,
+      });
+    }
+
+    if (this.BY_PASS_EMAIL_VERIFICATION && !user.isEmailVerified) {
+      console.log('user=>');
+      await this.sendEmailVerificationOtp(user.id, user.email);
+      throw new ForbiddenException({
+        code: 'EMAIL_NOT_VERIFIED',
+        message:
+          'Verify your email address to continue. We have sent a verification code to it.',
+        nextStep: NAVIGATION_SCREENS.OTP_SCREEN_FOR_VERIFY_EMAIL,
+        email: user.email,
+        expiresInSeconds: 300,
+        resendAvailableInSeconds: 60,
       });
     }
 
@@ -505,16 +637,23 @@ export class AuthService {
           lockedUntil: null,
           lastLoginAt: new Date(),
         },
-        omit: { passwordHash: true },
+        omit: {
+          passwordHash: true,
+          failedLoginAttempts: true,
+          lockedUntil: true,
+          deletedAt: true,
+        },
       }),
     ]);
 
     this.logger.log(`Signed in ${user.email}`);
 
+    this.setRefreshCookie(res, tokens.refreshToken);
+
     return {
       success: true,
-      message: 'Signed in successfully.',
       data: {
+        message: 'Signed in successfully.',
         userDetail: publicUser,
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
@@ -538,7 +677,7 @@ export class AuthService {
       OTP_TYPE.EMAIL_VERIFICATION,
       userId,
     );
-    this.logger.debug(`OTP for ${email}: ${otp}`);
+    console.log('OTP============================>', otp);
   }
 
   /** 401 for both a missing account and a wrong password — deliberately identical. */
@@ -548,7 +687,7 @@ export class AuthService {
       message: byEmail
         ? 'That email address and password do not match.'
         : 'That phone number and password do not match.',
-      action: 'RETRY',
+      nextStep: 'RETRY',
     });
   }
 
@@ -567,7 +706,7 @@ export class AuthService {
       {
         code: 'ACCOUNT_LOCKED',
         message: `Too many failed sign-in attempts. Try again in ${Math.ceil(retryAfterSeconds / 60)} minute(s).`,
-        action: 'RETRY_LATER',
+        nextStep: 'RETRY_LATER',
         retryAfterSeconds,
       },
       HttpStatus.LOCKED,
@@ -603,6 +742,126 @@ export class AuthService {
    * session. Every entry point that hands out tokens goes through here, so a
    * session always exists for a token that was issued.
    */
+  /**
+   * Swaps the refresh-token cookie for a new access token.
+   *
+   * The refresh token is rotated on every call: the session keeps only the
+   * hash of the newest one. An older token that still verifies means it was
+   * copied and used after the owner refreshed, so the whole session is
+   * revoked. Every failure also clears the cookie, so the client can go
+   * straight to sign-in.
+   */
+  async refresh(
+    refreshToken: string | undefined,
+    userAgent: string | undefined,
+    res: Response,
+  ) {
+    try {
+      if (!refreshToken) {
+        throw this.refreshRejected(
+          'REFRESH_TOKEN_MISSING',
+          'You are not signed in. Please sign in to continue.',
+        );
+      }
+
+      let payload: RefreshTokenPayload;
+      try {
+        payload = await this.jwt.verifyAsync<RefreshTokenPayload>(
+          refreshToken,
+          { secret: this.refreshSecret },
+        );
+      } catch {
+        throw this.refreshRejected(
+          'REFRESH_TOKEN_INVALID',
+          'Your session has expired. Please sign in again.',
+        );
+      }
+
+      // Tokens issued before sessionId was added to the payload cannot be
+      // matched to a session.
+      if (!payload.sessionId) {
+        throw this.refreshRejected(
+          'REFRESH_TOKEN_INVALID',
+          'Your session has expired. Please sign in again.',
+        );
+      }
+
+      const session = await this.sharedService.getSession(payload.sessionId);
+
+      if (!session || session.userId !== payload.sub) {
+        throw this.refreshRejected(
+          'SESSION_EXPIRED',
+          'Your session has ended. Please sign in again.',
+        );
+      }
+
+      if (!this.sharedService.refreshTokenMatches(session, refreshToken)) {
+        await this.sharedService.deleteSession(
+          session.sessionId,
+          session.userId,
+        );
+        this.logger.warn(
+          `Refresh token reuse on session ${session.sessionId}; session revoked`,
+        );
+        throw this.refreshRejected(
+          'REFRESH_TOKEN_REUSED',
+          'For your security this session was ended. Please sign in again.',
+        );
+      }
+
+      const user = await this.sharedService.prisma.user.findUnique({
+        where: { id: payload.sub },
+        omit: { passwordHash: false },
+      });
+
+      if (!user) {
+        await this.sharedService.deleteSession(
+          session.sessionId,
+          session.userId,
+        );
+        throw this.refreshRejected(
+          'SESSION_EXPIRED',
+          'Your session has ended. Please sign in again.',
+        );
+      }
+
+      this.sharedService.assertAccountIsUsable(user.status);
+
+      // Same session, new pair: overwriting the session stores the new
+      // refresh-token hash, which is what retires the old token.
+      const tokens = await this.issueTokens(user, session.sessionId);
+      await this.sharedService.cacheSession({
+        sessionId: session.sessionId,
+        userId: user.id,
+        token: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        userAgent: userAgent ?? session.userAgent,
+      });
+
+      this.setRefreshCookie(res, tokens.refreshToken);
+
+      return {
+        success: true,
+        message: 'Session refreshed.',
+        data: { accessToken: tokens.accessToken },
+      };
+    } catch (error) {
+      res.clearCookie(REFRESH_COOKIE, refreshCookieOptions());
+      throw error;
+    }
+  }
+
+  private setRefreshCookie(res: Response, refreshToken: string) {
+    res.cookie(REFRESH_COOKIE, refreshToken, {
+      ...refreshCookieOptions(),
+      maxAge: REFRESH_COOKIE_MAX_AGE_MS,
+    });
+  }
+
+  private refreshRejected(code: string, message: string) {
+    return new UnauthorizedException({ code, message, nextStep: 'SIGN_IN' });
+  }
+
   private async startSession(
     user: { id: string; email: string; role: UserRole },
     userAgent: string | undefined,
@@ -668,14 +927,20 @@ export class AuthService {
         : `${subject} verified successfully.`,
       data: alreadyDone
         ? { nextStep: 'Login' }
-        : { userDetail: user, accessToken, refreshToken, nextStep: 'Home' },
+        : {
+            userDetail: user,
+            accessToken,
+            refreshToken,
+            nextStep: 'Dashboard',
+          },
     };
   }
 
   private rejectExistingAccount(
-    existing: Pick<User, 'email' | 'phone' | 'status'>,
+    existing: Pick<User, 'email' | 'countryCode' | 'mobileNumber' | 'status'>,
     email: string,
-    phone: string,
+    mobileNumber: string,
+    countryCode: string,
   ): never {
     // Suspended and closed accounts answer the same way everywhere, so that
     // wording lives in SharedService. Both of those throw.
@@ -684,9 +949,14 @@ export class AuthService {
     // Name the field that collided so the client can highlight that input
     // instead of marking the whole form as wrong.
     const emailTaken = existing.email === email;
-    const phoneTaken = existing.phone === phone;
+    const phoneTaken = existing.mobileNumber === mobileNumber;
+    const countryCodeTaken = existing.countryCode === countryCode;
     const field =
-      emailTaken && phoneTaken ? 'both' : emailTaken ? 'email' : 'phone';
+      emailTaken && phoneTaken && countryCodeTaken
+        ? 'both'
+        : phoneTaken && countryCodeTaken
+          ? 'phone'
+          : 'email';
     const label =
       field === 'both'
         ? 'email address and phone number'
@@ -697,7 +967,7 @@ export class AuthService {
     throw new ConflictException({
       code: 'ACCOUNT_ALREADY_EXISTS',
       message: `An account with this ${label} already exists. Sign in instead, or reset your password if you have forgotten it.`,
-      action: 'SIGN_IN',
+      nextStep: 'SIGN_IN',
       field,
     });
   }
@@ -719,7 +989,11 @@ export class AuthService {
         expiresIn: '15m',
       }),
       this.jwt.signAsync(
-        { sub: user.id },
+        {
+          sub: user.id,
+          sessionId,
+          jti: randomBytes(16).toString('base64url'),
+        } satisfies RefreshTokenPayload,
         {
           secret: this.refreshSecret,
           expiresIn: '7d',

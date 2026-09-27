@@ -5,6 +5,8 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
+  Res,
 } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { CustomerRegisterDto } from './dto/customer-register.dto';
@@ -14,6 +16,8 @@ import { LoginDto } from './dto/login.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { VerifyResetOtpDto } from './dto/verify-reset-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { CheckEmailMobileDto } from './dto/checkEmailMobile.dto';
+import type { Request, Response } from 'express';
 
 @Controller('auth')
 export class AuthController {
@@ -24,6 +28,12 @@ export class AuthController {
     return this.authService.registerCustomer(dto);
   }
 
+  @Post('check-email-mobile')
+  @HttpCode(HttpStatus.OK)
+  checkEmail(@Body() dto: CheckEmailMobileDto) {
+    return this.authService.checkEmailMobile(dto);
+  }
+
   @Post('resend-otp')
   resendOtp(@Body() dto: ResendOtpDto) {
     return this.authService.resendOtp(dto);
@@ -32,15 +42,36 @@ export class AuthController {
   @Post('verify-otp')
   verifyOtp(
     @Body() dto: VerifyOtpDto,
-    @Headers('user-agent') userAgent?: string,
+    @Res({ passthrough: true }) res: Response,
+    @Headers('user-agent')
+    userAgent?: string,
   ) {
-    return this.authService.verifyOtp(dto, userAgent);
+    return this.authService.verifyOtp(dto, userAgent, res);
   }
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
-  login(@Body() dto: LoginDto, @Headers('user-agent') userAgent?: string) {
-    return this.authService.login(dto, userAgent);
+  login(
+    @Body() dto: LoginDto,
+    @Res({ passthrough: true }) res: Response,
+    @Headers('user-agent') userAgent?: string,
+  ) {
+    return this.authService.login(dto, userAgent, res);
+  }
+
+  // No body: the refresh token comes from the httpOnly cookie set at sign-in.
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  refresh(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+    @Headers('user-agent') userAgent?: string,
+  ) {
+    return this.authService.refresh(
+      req.cookies?.refreshToken as string | undefined,
+      userAgent,
+      res,
+    );
   }
 
   @Post('forgot-password')

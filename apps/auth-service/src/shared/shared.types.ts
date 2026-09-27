@@ -10,6 +10,13 @@ export interface JwtPayload {
   sessionId: string;
 }
 
+/** What the refresh token carries: enough to find and check its session. */
+export interface RefreshTokenPayload {
+  sub: string;
+  sessionId: string;
+  jti: string;
+}
+
 export interface AuthTokens {
   accessToken: string;
   refreshToken: string;

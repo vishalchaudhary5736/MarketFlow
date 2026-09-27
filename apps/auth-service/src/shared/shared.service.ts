@@ -31,7 +31,7 @@ const OTP_LENGTH = 4;
 const BCRYPT_ROUNDS = 12;
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_ATTEMPTS_TTL_MS = 15 * 60 * 1000;
-const OTP_RESEND_COOLDOWN_MS = 5*60 * 1000;
+const OTP_RESEND_COOLDOWN_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class SharedService {
@@ -56,11 +56,12 @@ export class SharedService {
     token: string;
     refreshToken: string;
   }) {
+    // Only hashes are kept, so a Redis dump cannot be replayed as tokens.
     const session: CachedSession = {
       sessionId,
       userId,
-      tokenHash: token,
-      refreshTokenHash: refreshToken,
+      tokenHash: this.hashToken(token),
+      refreshTokenHash: this.hashToken(refreshToken),
       userAgent: userAgent ?? null,
       createdAt: new Date().toISOString(),
     };
@@ -155,7 +156,6 @@ export class SharedService {
     );
   }
 
- 
   async otpResendCooldownRemaining(
     otpType: OTP_TYPE,
     identifier: string,
@@ -307,6 +307,21 @@ export class SharedService {
       action: 'RETRY',
       attemptsRemaining,
     });
+  }
+
+  /** True when `refreshToken` is the one this session was last issued. */
+  refreshTokenMatches(session: CachedSession, refreshToken: string): boolean {
+    const candidate = Buffer.from(this.hashToken(refreshToken), 'hex');
+    const expected = Buffer.from(session.refreshTokenHash, 'hex');
+
+    return (
+      candidate.length === expected.length &&
+      timingSafeEqual(candidate, expected)
+    );
+  }
+
+  private hashToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
   }
 
   private otpMatches(otp: string, storedHash: string): boolean {

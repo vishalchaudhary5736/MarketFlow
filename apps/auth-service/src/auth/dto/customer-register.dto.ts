@@ -1,5 +1,7 @@
 import {
+  IsBoolean,
   IsEmail,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Matches,
@@ -28,10 +30,20 @@ export class CustomerRegisterDto {
   password: string;
 
   @IsString()
-  @MinLength(10)
-  @MaxLength(15)
-  @Matches(/^\+?[1-9]\d{1,14}$/, {
-    message: 'Phone number must be in E.164 format',
+  @Matches(/^\+[1-9]\d{0,2}$/, {
+    message: 'Country code must be "+" followed by 1-3 digits, e.g. +91',
   })
-  phone: string;
+  countryCode: string;
+
+  @IsString()
+  @MinLength(4)
+  @MaxLength(14)
+  @Matches(/^\d+$/, {
+    message: 'Phone number must contain digits only',
+  })
+  mobileNumber: string;
+
+  @IsBoolean()
+  @IsNotEmpty()
+  agreeTerms: boolean;
 }

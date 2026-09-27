@@ -2,6 +2,7 @@ import {
   CallHandler,
   ExecutionContext,
   Injectable,
+  Logger,
   NestInterceptor,
   StreamableFile,
 } from '@nestjs/common';
@@ -26,6 +27,8 @@ const DEFAULT_MESSAGE = 'Request completed successfully.';
  */
 @Injectable()
 export class ResponseInterceptor implements NestInterceptor<unknown, unknown> {
+  private readonly logger = new Logger(ResponseInterceptor.name);
+
   constructor(private readonly reflector: Reflector) {}
 
   intercept(
@@ -100,6 +103,15 @@ export class ResponseInterceptor implements NestInterceptor<unknown, unknown> {
     }
 
     const { message, data, meta } = payload as ApiPayload;
+
+    // The envelope always says `success: true` here, so a handler that
+    // returned `success: false` would mislead the client. Failures must be
+    // thrown as HttpExceptions instead (see ApiPayload).
+    if ((payload as { success: boolean }).success === false) {
+      this.logger.error(
+        `Handler returned success: false ("${message}"); it was sent as success: true. Throw an HttpException instead.`,
+      );
+    }
 
     return {
       message: message ?? declaredMessage ?? DEFAULT_MESSAGE,

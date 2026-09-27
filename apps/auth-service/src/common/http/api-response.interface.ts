@@ -12,12 +12,9 @@ export type ApiAction = string;
 
 export interface ApiSuccessResponse<T = unknown> {
   success: true;
+  message?: string;
   statusCode: number;
-  /** Human-readable and safe to show as-is. */
-  message: string;
-  /** The payload. `null` rather than absent, so the key is always there. */
   data: T | null;
-  /** Pagination, counts, anything about the payload rather than in it. */
   meta?: Record<string, unknown> | null;
   timestamp: string;
   path: string;
@@ -35,11 +32,8 @@ export interface ApiErrorResponse {
   statusCode: number;
   code: ApiErrorCode;
   message: string;
-  /** Present whenever the server knows what the client should offer next. */
   action?: ApiAction;
-  /** Field-level detail for form errors; `null` when the failure is not per-field. */
   errors?: ApiFieldError[] | null;
-  /** Extra context tied to the code — `field`, `attemptsRemaining`, … */
   details?: Record<string, unknown> | null;
   timestamp: string;
   path: string;
@@ -48,12 +42,8 @@ export interface ApiErrorResponse {
 
 export type ApiResponse<T = unknown> = ApiSuccessResponse<T> | ApiErrorResponse;
 
-/**
- * What a service/controller may return to steer the envelope. Anything else it
- * returns is treated as `data` wholesale, so existing handlers keep working.
- */
 export interface ApiPayload<T = unknown> {
-  success?: boolean;
+  success?: true;
   message?: string;
   data?: T;
   meta?: Record<string, unknown> | null;
