@@ -2,7 +2,7 @@
 // its connection from the driver adapter in PrismaService.
 
 // npx prisma migrate dev --name descibe_your_changes
-// npx primsa generate
+// npx prisma generate
 
 generator client {
   provider = "prisma-client"
@@ -17,6 +17,7 @@ enum UserRole {
   CUSTOMER
   SELLER
   ADMIN
+  SUB_ADMIN
 }
 
 enum UserStatus {
@@ -27,29 +28,45 @@ enum UserStatus {
 }
 
 model User {
-  id                  String     @id @default(uuid()) @db.Uuid
-  email               String     @db.VarChar(255)
-  emailVerifiedAt     DateTime?  @map("email_verified_at") @db.Timestamptz(3)
-  isEmailVerified     Boolean    @default(false) @map("is_email_verified")
-  mobileNumber        String?    @db.VarChar(15)
-  countryCode         String?    @db.VarChar(5)
-  agreeTerms          Boolean    @default(false) @map("agree_terms")
-  phoneVerifiedAt     DateTime?  @map("phone_verified_at") @db.Timestamptz(3)
-  passwordHash        String     @map("password_hash") @db.VarChar(255)
-  firstName           String     @map("first_name") @db.VarChar(100)
-  lastName            String?    @map("last_name") @db.VarChar(100)
-  avatarUrl           String?    @map("avatar_url")
-  role                UserRole   @default(CUSTOMER)
-  status              UserStatus @default(INACTIVE)
-  failedLoginAttempts Int        @default(0) @map("failed_login_attempts")
-  lockedUntil         DateTime?  @map("locked_until") @db.Timestamptz(3)
-  lastLoginAt         DateTime?  @map("last_login_at") @db.Timestamptz(3)
-  createdAt           DateTime   @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt           DateTime   @updatedAt @map("updated_at") @db.Timestamptz(3)
-  deletedAt           DateTime?  @map("deleted_at") @db.Timestamptz(3)
+  id                      String         @id @default(uuid()) @db.Uuid
+  email                   String         @db.VarChar(255)
+  emailVerifiedAt         DateTime?      @map("email_verified_at") @db.Timestamptz(3)
+  isEmailVerified         Boolean        @default(false) @map("is_email_verified")
+  mobileNumber            String?        @db.VarChar(15)
+  countryCode             String?        @db.VarChar(5)
+  agreeTerms              Boolean        @default(false) @map("agree_terms")
+  phoneVerifiedAt         DateTime?      @map("phone_verified_at") @db.Timestamptz(3)
+  passwordHash            String         @map("password_hash") @db.VarChar(255)
+  firstName               String         @map("first_name") @db.VarChar(100)
+  lastName                String?        @map("last_name") @db.VarChar(100)
+  avatarUrl               String?        @map("avatar_url")
+  role                    UserRole       @default(CUSTOMER)
+  status                  UserStatus     @default(INACTIVE)
+  failedLoginAttempts     Int            @default(0) @map("failed_login_attempts")
+  lockedUntil             DateTime?      @map("locked_until") @db.Timestamptz(3)
+  lastLoginAt             DateTime?      @map("last_login_at") @db.Timestamptz(3)
+  createdAt               DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt               DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt               DateTime?      @map("deleted_at") @db.Timestamptz(3)
+  isSubAdmin              Boolean        @default(false) @map("is_subadmin")
+  twoFactorEnabled        Boolean        @default(false) @map("two_factor_enabled")
+  twoFactorSecret         String?        @map("two_factor_secret")
+  twoFactorSetupCompleted Boolean        @default(false) @map("two_factor_setup_completed")
+  recoveryCodes           RecoveryCode[]
 
   // Same email may exist once per role (e.g. a customer and a seller account).
   @@unique([email, role])
   // Same mobile number may exist once per role.
   @@unique([countryCode, mobileNumber, role])
+}
+
+model RecoveryCode {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  codeHash  String    @map("code_hash")
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(3)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }

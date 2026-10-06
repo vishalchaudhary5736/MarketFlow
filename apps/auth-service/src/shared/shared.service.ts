@@ -16,6 +16,7 @@ import { createHash, randomInt, timingSafeEqual } from 'crypto';
 import { Prisma, UserStatus } from '../../../../generated/prisma/client';
 import { OTP_TYPE } from '../auth/constants.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { generateUniqueValue } from './crypto.util';
 
 export interface CachedSession {
   sessionId: string;
@@ -32,6 +33,7 @@ const BCRYPT_ROUNDS = 12;
 const MAX_OTP_ATTEMPTS = 5;
 const OTP_ATTEMPTS_TTL_MS = 15 * 60 * 1000;
 const OTP_RESEND_COOLDOWN_MS = 5 * 60 * 1000;
+const TWO_FACTOR_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class SharedService {
@@ -130,6 +132,42 @@ export class SharedService {
 
   private userSessionsKey(userId: string): string {
     return `user-sessions:${userId}`;
+  }
+
+  // ---- Two-factor sign-in ---------------------------------------------------
+
+  /**
+   * Starts a pending two-factor sign-in: returns a one-off token the client
+   * sends back with the authenticator code. Only its hash is stored, mapped to
+   * the user, and it expires after TWO_FACTOR_CHALLENGE_TTL_MS.
+   */
+  async createTwoFactorChallenge(userId: string): Promise<string> {
+    const token = generateUniqueValue(32);
+
+    await this.cacheService.set(
+      this.twoFactorKey(token),
+      userId,
+      TWO_FACTOR_CHALLENGE_TTL_MS,
+    );
+
+    return token;
+  }
+
+  /**
+   * The user a pending two-factor sign-in belongs to, or null when the token
+   * is unknown or expired. The token is deleted, so it works once.
+   */
+  async consumeTwoFactorChallenge(token: string): Promise<string | null> {
+    const key = this.twoFactorKey(token);
+    const userId = (await this.cacheService.get<string>(key)) ?? null;
+
+    await this.cacheService.del(key);
+
+    return userId;
+  }
+
+  private twoFactorKey(token: string): string {
+    return `2fa-challenge:${this.hashToken(token)}`;
   }
 
   async generateOtp(otpType: OTP_TYPE, identifier: string): Promise<string> {

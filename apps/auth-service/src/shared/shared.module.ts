@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { JwtModule } from '@nestjs/jwt';
+import { JwtModule, JwtSignOptions } from '@nestjs/jwt';
 import { PrismaModule } from '../prisma/prisma.module';
 import { CacheModule } from '@nestjs/cache-manager';
 import { createKeyv } from '@keyv/redis';
@@ -18,7 +18,14 @@ import { SharedService } from './shared.service';
         ttl: Number(process.env.REDIS_TTL),
       }),
     }),
-    JwtModule.register({}),
+    JwtModule.register({
+      global: true,
+      secret: process.env.JWT_ACCESS_SECRET,
+      signOptions: {
+        expiresIn: (process.env.JWT_ACCESS_TTL ??
+          '15m') as JwtSignOptions['expiresIn'],
+      },
+    }),
   ],
   providers: [SharedService],
   exports: [PrismaModule, JwtModule, SharedService],

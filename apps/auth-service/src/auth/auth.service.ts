@@ -10,14 +10,18 @@ import {
   NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
+import { JwtService, JwtSignOptions } from '@nestjs/jwt';
 import {
   User,
   UserRole,
   UserStatus,
 } from '../../../../generated/prisma/client';
 import { CustomerRegisterDto } from './dto/customer-register.dto';
-import { NAVIGATION_SCREENS, OTP_TYPE } from './constants.service';
+import {
+  NAVIGATION_SCREENS,
+  OTP_TYPE,
+  TokenPurpose,
+} from './constants.service';
 import { SharedService } from '../shared/shared.service';
 import {
   AuthTokens,
@@ -26,6 +30,7 @@ import {
   RefreshTokenPayload,
   UserTableTypes,
 } from '../shared/shared.types';
+import { TempJwtPayload } from './constants.service';
 import { randomBytes } from 'crypto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { LoginDto } from './dto/login.dto';
@@ -34,12 +39,15 @@ import { VerifyResetOtpDto } from './dto/verify-reset-otp.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { CheckEmailMobileDto } from './dto/checkEmailMobile.dto';
 import type { Response } from 'express';
+import { AdminLogin } from './dto/admin-login.dto';
+import { LogoutDto } from './dto/logout.dto';
 
 // Five wrong passwords lock the account for fifteen minutes. The counter and
 // the deadline live on the user row (`failedLoginAttempts`, `lockedUntil`) so a
 // lockout survives a cache flush or a service restart.
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCK_DURATION_MS = 15 * 60 * 1000;
+const RECOVERY_CODE_COUNT = 10;
 
 // The refresh token lives in an httpOnly cookie scoped to /auth, so only the
 // refresh (and future logout) calls ever carry it. Setting and clearing must
@@ -67,6 +75,147 @@ export class AuthService {
     private readonly sharedService: SharedService,
     private readonly jwt: JwtService,
   ) {}
+
+  private signTempToken(admin: User, purpose: TokenPurpose): Promise<string> {
+    const payload: TempJwtPayload = {
+      sub: admin.id,
+      role: admin.role,
+      purpose,
+    };
+    // Signed with the default (access) secret so AuthGaurd can verify it; the
+    // `purpose` claim keeps it from being accepted as an access token.
+    return this.jwt.signAsync(payload, {
+      expiresIn: (process.env.TEMP_TOKEN_TTL ??
+        '5m') as JwtSignOptions['expiresIn'],
+    });
+  }
+
+  /**
+   * Ends the caller's session, or every session on the account when
+   * `allDevices` is set. The session id comes from the access token: the
+   * refresh cookie is scoped to /auth, so it never reaches /admin/auth.
+   */
+  async logout(user: JwtPayload, dto: LogoutDto, res: Response) {
+    if (dto.allDevices) {
+      await this.sharedService.deleteAllUserSessions(user.sub);
+    } else if (user.sessionId) {
+      await this.sharedService.deleteSession(user.sessionId, user.sub);
+    }
+
+    res.clearCookie(REFRESH_COOKIE, refreshCookieOptions());
+
+    this.logger.log(
+      `Signed out ${user.email}${dto.allDevices ? ' on all devices' : ''}`,
+    );
+
+    return {
+      success: true,
+      message: dto.allDevices
+        ? 'Signed out on all devices.'
+        : 'Signed out successfully.',
+    };
+  }
+  /**
+   * Final step of admin sign-in (after the password, or after 2FA): clears the
+   * failed-login counter, starts a session and sets the refresh cookie.
+   */
+  async completeAdminLogin(
+    admin: Omit<User, 'passwordHash'>,
+    userAgent: string | undefined,
+    res: Response,
+  ) {
+    const [tokens, userDetail] = await Promise.all([
+      this.startSession(admin, userAgent),
+      this.sharedService.prisma.user.update({
+        where: { id: admin.id },
+        data: {
+          failedLoginAttempts: 0,
+          lockedUntil: null,
+          lastLoginAt: new Date(),
+        },
+        omit: {
+          passwordHash: true,
+          failedLoginAttempts: true,
+          lockedUntil: true,
+          deletedAt: true,
+          twoFactorSecret: true,
+        },
+      }),
+    ]);
+
+    this.logger.log(`Signed in ${admin.email}`);
+
+    this.setRefreshCookie(res, tokens.refreshToken);
+
+    return {
+      success: true,
+      data: {
+        message: 'Signed in successfully.',
+        userDetail,
+        accessToken: tokens.accessToken,
+        nextStep: NAVIGATION_SCREENS.DASHBOARD,
+      },
+    };
+  }
+
+  async adminLogin(
+    dto: AdminLogin,
+    userAgent: string | undefined,
+    res: Response,
+  ) {
+    const email = dto.email.trim().toLowerCase();
+    const admin = await this.sharedService.prisma.user.findUnique({
+      where: { email_role: { email: email, role: UserRole.ADMIN } },
+    });
+
+    if (!admin) {
+      throw this.invalidCredentials(true);
+    }
+
+    this.sharedService.assertAccountIsUsable(admin.status);
+    this.assertNotLockedOut(admin.lockedUntil);
+
+    const passwordMatches = await this.sharedService.comparePassword(
+      dto.password,
+      admin.passwordHash,
+    );
+
+    if (!passwordMatches) {
+      const lockedUntil = await this.recordFailedLogin(
+        admin.id,
+        admin.failedLoginAttempts,
+      );
+      this.assertNotLockedOut(lockedUntil);
+
+      throw this.invalidCredentials(true);
+    }
+
+    if (admin.isSubAdmin) {
+      return this.completeAdminLogin(admin, userAgent, res);
+    }
+
+    console.log('admin=========>', admin);
+
+    if (!admin.twoFactorEnabled) {
+      return {
+        success: true,
+        message: '2 factor setup required.',
+        data: {
+          tempToken: await this.signTempToken(admin, TokenPurpose.TWO_FA_SETUP),
+          nextStep: NAVIGATION_SCREENS.TWO_FA_SETUP,
+        },
+      };
+    }
+
+    return {
+      success: true,
+      message: '2 factor required.',
+      data: {
+        tempToken: await this.signTempToken(admin, TokenPurpose.TWO_FA_VERIFY),
+        nextStep: NAVIGATION_SCREENS.TWO_FA_VERIFICATION,
+      },
+    };
+  }
 
   async checkEmailMobile({
     email,
@@ -400,13 +549,6 @@ export class AuthService {
     );
   }
 
-  /**
-   * Step 1 of the reset: issues a code to the address on the account.
-   *
-   * No mailer is wired up yet, so the code goes to the debug log instead of an
-   * inbox. Everything around it is real — the code is hashed, expires, and is
-   * rate limited — so swapping the log line for a send is the only step left.
-   */
   async forgotPassword({ email }: ForgotPasswordDto) {
     const account = await this.findCustomerForPasswordReset(email);
     const cooldown = await this.sharedService.otpResendCooldownRemaining(
@@ -449,14 +591,6 @@ export class AuthService {
     };
   }
 
-  /**
-   * Step 2, optional: checks the code without spending it.
-   *
-   * The code is deliberately not deleted here — /auth/reset-password asks for
-   * it again and is the only place that consumes it. So a client that skips
-   * this call still works, and one that makes it is not left holding a code
-   * the server already threw away.
-   */
   async verifyPasswordResetOtp({ email, otp }: VerifyResetOtpDto) {
     const account = await this.findCustomerForPasswordReset(email);
 
@@ -474,8 +608,6 @@ export class AuthService {
       data: { email: account.email, nextStep: 'RESET_PASSWORD' },
     };
   }
-
-  /** Step 3: sets the new password and signs every device out. */
   async resetPassword({ email, otp, newPassword }: ResetPasswordDto) {
     const account = await this.findCustomerForPasswordReset(email);
 
@@ -592,15 +724,11 @@ export class AuthService {
         user.id,
         user.failedLoginAttempts,
       );
-
-      // A wrong password that tripped the limit answers 423, not 401: the next
-      // attempt would be refused anyway, and the client needs to say so.
       this.assertNotLockedOut(lockedUntil);
 
       throw this.invalidCredentials(byEmail);
     }
 
-    console.log('user=>', user);
     if (!this.BY_PASS_EMAIL_VERIFICATION && !user.isEmailVerified) {
       await this.sendEmailVerificationOtp(user.id, user.email);
       throw new ForbiddenException({
@@ -681,13 +809,16 @@ export class AuthService {
   }
 
   /** 401 for both a missing account and a wrong password — deliberately identical. */
-  private invalidCredentials(byEmail = true): UnauthorizedException {
+  private invalidCredentials(
+    byEmail = true,
+    nextStep = NAVIGATION_SCREENS.LOGIN_SCREEN,
+  ): UnauthorizedException {
     return new UnauthorizedException({
       code: 'INVALID_CREDENTIALS',
       message: byEmail
         ? 'That email address and password do not match.'
         : 'That phone number and password do not match.',
-      nextStep: 'RETRY',
+      nextStep: nextStep,
     });
   }
 
@@ -700,13 +831,11 @@ export class AuthService {
       (lockedUntil.getTime() - Date.now()) / 1000,
     );
 
-    // 423 Locked: the credentials are not being judged at all, the account is
-    // temporarily closed to sign-in attempts.
     throw new HttpException(
       {
         code: 'ACCOUNT_LOCKED',
         message: `Too many failed sign-in attempts. Try again in ${Math.ceil(retryAfterSeconds / 60)} minute(s).`,
-        nextStep: 'RETRY_LATER',
+        nextStep: NAVIGATION_SCREENS.LOGIN_SCREEN,
         retryAfterSeconds,
       },
       HttpStatus.LOCKED,

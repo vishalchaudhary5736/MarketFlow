@@ -82,6 +82,10 @@ docker-compose.yml     → runs all 9 services (Redis/Postgres are cloud service
   - `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` — credentials for the database (kept for reference/documentation even though there's no local Postgres container to auto-initialize with them anymore).
   - `POSTGRES_PORT` — Postgres's default port (`5432`), mostly informational now.
   - `DATABASE_URL` — the actual connection string Prisma reads, currently pointing at a managed **Neon** Postgres instance (`...neon.tech`, with `sslmode=require`).
+- **Admin 2FA variables:**
+  - `TEMP_TOKEN_TTL` — lifetime of the temporary token between the admin password step and 2FA (default `5m`).
+  - `TWO_FACTOR_ENCRYPTION_KEY` — **required** for 2FA: 32 random bytes, base64 (`openssl rand -base64 32`). It encrypts authenticator secrets in the database. Changing it makes existing secrets unreadable.
+  - `TWO_FACTOR_ISSUER` — the name shown in the authenticator app (default `E-commerce Admin`).
 
 ## 5. TypeScript configuration
 
@@ -324,7 +328,54 @@ docker compose down           # stop and remove everything
     - Known limits / follow-ups:
         - `login` and `verify-otp` **still also return `refreshToken` in the JSON body**. Any script on the page can read that, which undoes the point of the httpOnly cookie.
         - Two tabs refreshing at the same moment with the same cookie: the slower one looks like reuse and ends the session. The frontend should share one in-flight refresh call.
-        - No `/auth/logout` yet (`LogoutDto` exists but no endpoint).
+        - No customer `/auth/logout` yet. Admins have `POST /admin/auth/logout` (entry 31).
+25. Added `generateUniqueValue(bytes = 16)` in [shared/crypto.util.ts](apps/auth-service/src/shared/crypto.util.ts). It returns a cryptographically random, URL-safe string (`randomBytes(bytes).toString('base64url')`): 22 characters by default (128 bits), 43 characters with `32`. Use it for session ids, token ids (`jti`), reset/invite codes and so on. Checked: 100,000 generated values were all unique, and `tsc` is clean. `auth.service.ts` still calls `randomBytes(16).toString('base64url')` directly for `sessionId` and `jti`; those can switch to this helper.
+26. Fixed the in-progress **admin login** (`POST /admin/auth/login`). It had been added by hand: `adminLogin()` in `AuthService`, [admin-auth.controller.ts](apps/auth-service/src/auth/admin-auth.controller.ts), [dto/admin-login.dto.ts](apps/auth-service/src/auth/dto/admin-login.dto.ts), and `isSubAdmin` on `User` in the schema. Flow: look up `(email, ADMIN)`, check the password, then a sub-admin gets a session (access token in the body plus the refresh cookie) and a super admin (`isSubAdmin: false`) gets a pending two-factor sign-in instead.
+    - `auth.service.ts` did not parse (`token:` had no value), which broke the whole service. The 2FA branch now returns `twoFactorToken` from `sharedService.createTwoFactorChallenge(admin.id)`.
+    - The 2FA response **leaked the password hash**: it did `{ ...admin, password: null }`, but the column is `passwordHash`. It now returns only `id, email, firstName, lastName, role`.
+    - Added `assertAccountIsUsable(admin.status)`: blocked or deleted admins could log in before.
+    - Controller: `@Res()` → `@Res({ passthrough: true })` (without it Nest ignores the returned value and **the request hangs**). Added `@HttpCode(200)`, and `userAgent` is optional.
+    - DTO: `@Min(8)` → `@MinLength(8)`. `Min` compares numbers, so **every password string was rejected with a 400**. Added `@MaxLength`.
+    - `AdminAuthcontroller` was not in `AuthModule.controllers`, so the route did not exist. Registered it.
+    - [shared.service.ts](apps/auth-service/src/shared/shared.service.ts): new `createTwoFactorChallenge(userId)` (a 32-byte `generateUniqueValue`, stored in Redis as `2fa-challenge:<sha256>` → userId, 5 min TTL) and `consumeTwoFactorChallenge(token)` (returns the userId once, then deletes the token), ready for the verify-2FA step.
+    - Cleanup: removed two `console.log`s (one printed the OTP; it is now `logger.debug` like the rest of the file) and an unused `UserTableTypes` import.
+    - Verified with real HTTP requests through the real controller, `AuthService` and `SharedService`, with in-memory Redis/Prisma. Results: super admin → 200 with `requiresTwoFactor`, `twoFactorToken` and a safe `userDetail`, stored in Redis by hash, and consumable only once. Sub admin → 200 with an access token and the refresh cookie. Wrong password / unknown admin → 401 `INVALID_CREDENTIALS`. Blocked admin → 403 `ACCOUNT_SUSPENDED`. Short password → 400. No response contained a password hash. `tsc` and `eslint` are clean.
+    - Still open:
+        - No `/admin/auth/verify-2fa` yet, and no authenticator secret column on `User`, so super admins cannot finish signing in.
+        - The admin refresh cookie uses the same name and `path: /auth` as the customer one, so it is not sent to `/admin/auth/*` and the two sessions overwrite each other in one browser.
+        - The admin branch skips `resetFailedLogin` until 2FA passes, which is fine.
+        - The sub-admin success response keeps `message` inside `data`, so the top-level message is the generic "Request completed successfully.".
+27. Finished **admin 2FA with an authenticator app** (TOTP via `otplib` v12 and `qrcode`, both already installed). After `POST /admin/auth/login`, a super admin gets a short-lived `tempToken` whose JWT `purpose` is `2fa_setup` (2FA not on yet) or `2fa_verify` (2FA on). `AuthGaurd` together with `@TwoFactorStep()` only accepts a token with the matching purpose on each route.
+    - [two.factor.service.ts](apps/auth-service/src/auth/two.factor.service.ts) did not compile: it imported `generateSecret` / `generateURI` / `verify`, which are **otplib v13** functions. v12 exports only `authenticator`. It now uses `authenticator.clone({ window: 1 })`, which accepts ±30 s of clock drift.
+    - `POST /admin/auth/2fa/setup` (`2fa_setup` token): generates a secret, stores it **encrypted** in `User.twoFactorSecret` (still inactive), and returns `qrCode` (a PNG data URL), `otpauthUrl` and `manualEntryKey`. Calling it again replaces an unconfirmed secret.
+    - `POST /admin/auth/2fa/setup/confirm` (`2fa_setup` token, body `{ code }`): checks the first 6-digit code, sets `twoFactorEnabled` and `twoFactorSetupCompleted`, then signs the admin in.
+    - `POST /admin/auth/2fa/verify` (`2fa_verify` token, body `{ code }`): the second sign-in step when 2FA is already on.
+    - Both code routes use `STRICT_LIMIT` (5 per minute) and [dto/two-fa-code.dto.ts](apps/auth-service/src/auth/dto/two-fa-code.dto.ts) (`^\d{6}$`). The service re-checks that the user is an `ADMIN` and that `assertAccountIsUsable` passes, because a temp token outlives a status change.
+    - The sub-admin success block of `adminLogin` became the public `AuthService.completeAdminLogin(admin, userAgent, res)`, which the 2FA routes reuse. Its `userDetail` now also omits `twoFactorSecret`.
+    - **Bugs fixed in `adminLogin`:** `signTempToken` passed `process.env.TEMP_TOKEN_TTL` as the JWT **secret** and set no expiry. It now signs with the default (access) secret, so `AuthGaurd` can verify it, and uses `expiresIn: TEMP_TOKEN_TTL ?? '5m'`. The temp token was returned **without `await`**, so clients received `{}`. Both responses also now include `nextStep: AUTHENTICATOR_SCREEN`.
+    - [crypto.util.ts](apps/auth-service/src/shared/crypto.util.ts): added `encryptSecret` / `decryptSecret` (AES-256-GCM, stored as `iv.tag.ciphertext` in base64url) with the key in `TWO_FACTOR_ENCRYPTION_KEY`.
+    - Verified: `tsc` is clean. A smoke test showed that encrypt/decrypt round-trips, a generated code verifies, a wrong code is rejected, and the QR data URL is produced. The HTTP endpoints were **not** exercised.
+    - Still open:
+        - A code can be replayed within its 30 s window, and so can a `2fa_verify` token until it expires. A fix is to store the last used time step per user in Redis.
+        - Wrong 2FA codes do not count toward `failedLoginAttempts`. Only the throttle limits guessing.
+        - The now-unused `createTwoFactorChallenge` / `consumeTwoFactorChallenge` in `SharedService` can be removed, or used to make the temp token single-use.
+        - No 2FA disable/reset or recovery codes yet.
+28. Fixed the `RecoveryCode` model in [schema.prisma](prisma/schema.prisma). `usedAt` was a required `String` mapped to `user_at`, so an unused code could not be inserted. It is now `DateTime? @map("used_at") @db.Timestamptz(3)`. Also fixed a comment typo (`primsa` → `prisma`).
+    - The migration `20260930174458_add_admin_2fa_recovery_codes` **failed on the Neon DB**. Its SQL created `user_id` as `TEXT`, and Postgres cannot add a foreign key from `TEXT` to `User.id` (`UUID`). The schema now has `@db.Uuid`, but the SQL was never regenerated.
+    - **Pending, to be run by hand:** drop the half-created `RecoveryCode` table, `prisma migrate resolve --rolled-back 20260930174458_add_admin_2fa_recovery_codes`, delete that migration folder, then `prisma migrate dev --name add_admin_2fa_recovery_codes`.
+    - Still open: `UserRole.SUB_ADMIN` and `User.isSubAdmin` both describe sub-admins, and only `isSubAdmin` is used. Keep one.
+
+29. Fixed the `adminLogin` 2FA responses in [auth.service.ts](apps/auth-service/src/auth/auth.service.ts). Both branches returned their payload under `details`, but `ResponseInterceptor` only lifts `message` / `data` / `meta` out of a handler's return. The `details` key was dropped, so the client got `data: null` with no `tempToken` or `nextStep`. Both branches now return `data`. `nextStep` is now `TWO_FA_SETUP` or `TWO_FA_VERIFICATION`; the older `AUTHENTICATOR_SCREEN` (entry 27) is gone, so the admin frontend must match on the new values.
+
+30. Fixed `TwoFaService.confirmSetup` in [two.factor.service.ts](apps/auth-service/src/auth/two.factor.service.ts). Inside the `$transaction` callback, `tx.user.update(...)` was not awaited. Prisma queries only run when awaited, so `twoFactorEnabled` and `twoFactorSetupCompleted` were never set, even though the confirm call succeeded and signed the admin in. It is awaited now. Admins who confirmed before this fix still have both flags `false` and must run setup again.
+    - Still open: `confirmSetup` returns `recoveryCodes` at the top level, next to `success`/`data`, and `ResponseInterceptor` drops it (same problem as entry 29). The codes should move inside `data`.
+    - Still open: `POST /admin/auth/2fa/recovery` validates its body with `TwoFaCodeDto` (6 digits), so recovery codes like `ABCD-EFGH` never pass validation.
+
+31. Added **admin logout**: `POST /admin/auth/logout` in [admin-auth.controller.ts](apps/auth-service/src/auth/admin-auth.controller.ts) and `AuthService.logout(user, dto, res)` in [auth.service.ts](apps/auth-service/src/auth/auth.service.ts). It needs a normal access token (`AuthGaurd`), is limited by `STRICT_LIMIT`, and returns 200.
+    - The body is [`LogoutDto`](apps/auth-service/src/auth/dto/logout.dto.ts) with an optional `allDevices`. Without it, only the caller's session (`req.user.sessionId` from the access token) is deleted from Redis. With `allDevices: true`, `deleteAllUserSessions` ends every session on the account.
+    - The session id comes from the **access token, not the cookie**: the refresh cookie has `path: /auth`, so the browser never sends it to `/admin/auth/*`. The response still clears that cookie, because a `Set-Cookie` may name any path on the same host.
+    - Verified: `tsc` is clean. The endpoint was **not** exercised over HTTP.
+    - Still open: `AuthGaurd` does not check the session in Redis, so an access token still works after logout until it expires (15 min). The guard should call `getSession(payload.sessionId)` and reject when the session is missing.
 
 ## 11. Not set up yet (future work)
 

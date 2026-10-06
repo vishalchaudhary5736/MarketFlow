@@ -1,5 +1,5 @@
 import { User, UserRole } from '../../../../generated/prisma/client';
-
+import type { Request } from 'express';
 /** A user row safe to return over HTTP — the password hash is never included. */
 export type PublicUser = Omit<User, 'passwordHash'>;
 
@@ -25,5 +25,7 @@ export interface AuthTokens {
 export interface AuthResult extends AuthTokens {
   user: PublicUser;
 }
+
+export type adminPRequest = Request & { user: JwtPayload };
 
 export type UserTableTypes = User;
