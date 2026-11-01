@@ -8,6 +8,7 @@ import {
   Patch,
   Post,
   Req,
+  UseGuards,
 } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -17,9 +18,12 @@ import { ResponseMessage } from '../common/http';
 import { SkipUser } from './dto/skip-user.dto';
 import { PresignedUrlDto } from '../shared/dto/presignedUrl.dto';
 import { UpdateProfile } from './dto/updateProfile.dto';
+import { AuthGaurd } from '../shared/guard/auth.gaurd';
+import { RolesGuard } from '../shared/guard/roles.guard';
 
 // These handlers return the row itself; the global interceptor puts it in the
 // envelope under `data`, and @ResponseMessage supplies the envelope's message.
+@UseGuards(AuthGaurd, RolesGuard)
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}

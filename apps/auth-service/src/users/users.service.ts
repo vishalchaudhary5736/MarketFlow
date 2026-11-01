@@ -76,7 +76,8 @@ export class UsersService {
     const uploadUrls = await this.sharedService.getUploadUrl(dto, userId);
     return {
       success: true,
-      uploadUrls,
+      message: 'Upload URLs generated successfully.',
+      data: { uploadUrls },
     };
   }
 

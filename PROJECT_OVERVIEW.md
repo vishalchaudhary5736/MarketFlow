@@ -391,6 +391,18 @@ docker compose down           # stop and remove everything
     - [users.controller.ts](apps/auth-service/src/users/users.controller.ts) and [users.service.ts](apps/auth-service/src/users/users.service.ts) now import the shared DTO. [users/dto/presignedUrl.dto.ts](apps/auth-service/src/users/dto/presignedUrl.dto.ts) is an identical copy and nothing imports it now, so it can be deleted.
     - Verified: `tsc` is clean. No URL was generated, and nothing was uploaded to S3.
 
+35. Fixed `UsersController` guards in [users.controller.ts](apps/auth-service/src/users/users.controller.ts). The line read `UseGuards(AuthGaurd, RolesGuard);` without the `@`, so it was a plain function call and not a decorator. No guard ran on `/users/*`, `req.user` was never set, and `POST /users/generate-presigned-url` (also `skip-profile` and `update-profile`) failed with `500 Cannot read properties of undefined (reading 'sub')`. It is now `@UseGuards(AuthGaurd, RolesGuard)`, as in `auth.controller.ts`.
+    - Side effect: every `/users` route now needs an access token, including `POST /users`, `GET /users`, `GET/PATCH/DELETE /users/:id`. Mark any of them `@Public()` if they should stay open.
+    - Removed the debug `console.log` from `createPresingedUrl`.
+    - Verified: `tsc` is clean. The endpoint was not called over HTTP.
+
+36. Fixed `POST /users/generate-presigned-url` returning `data: null`. In [users.service.ts](apps/auth-service/src/users/users.service.ts), `generatePresignedUrl` returned `{ success: true, uploadUrls }`. Because the object has `success`, the global `ResponseInterceptor` treats it as an envelope and keeps only `message`, `data` and `meta`, so `uploadUrls` was dropped. It now returns `{ success: true, message, data: { uploadUrls } }`, and the client reads `response.data.uploadUrls`.
+    - Rule: a handler that returns `success` must put its payload under `data`. Any other key is silently discarded.
+    - Verified: `tsc` is clean. The endpoint was not called over HTTP.
+
+37. Removed checksum parameters from presigned upload URLs in [s3Config.ts](apps/auth-service/src/shared/config/s3Config.ts). With its default settings, `@aws-sdk/client-s3` (3.1152) computed a CRC32 checksum for `PutObject` while signing. No body existed at that point, so it signed the checksum of an **empty** body into the URL (`x-amz-checksum-crc32`, `x-amz-sdk-checksum-algorithm`). S3 would then reject the real browser upload because its checksum did not match. The `S3Client` now sets `requestChecksumCalculation: 'WHEN_REQUIRED'` and `responseChecksumValidation: 'WHEN_REQUIRED'`, so it adds checksums only when an operation requires them.
+    - Verified: `tsc` is clean. No URL was generated, and nothing was uploaded.
+
 ## 11. Not set up yet (future work)
 
 - Redis Cloud / Neon credentials are currently committed only to your local `.env` (correctly gitignored) — if this project gets a real deployment pipeline, these need to move to a proper secrets manager rather than living in a plain `.env` file on someone's machine.

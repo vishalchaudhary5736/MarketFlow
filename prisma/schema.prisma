@@ -20,6 +20,11 @@ enum UserRole {
   SUB_ADMIN
 }
 
+enum Gender {
+  Male
+  Female
+}
+
 enum UserStatus {
   ACTIVE
   INACTIVE
@@ -35,6 +40,8 @@ model User {
   mobileNumber            String?        @db.VarChar(15)
   isMobileVerified        Boolean        @default(false) @map("is_mobile_verified")
   countryCode             String?        @db.VarChar(5)
+  dob                     DateTime?      @db.Date
+  gender                  Gender?
   agreeTerms              Boolean        @default(false) @map("agree_terms")
   mobileVerifiedAt        DateTime?      @map("phone_verified_at") @db.Timestamptz(3)
   passwordHash            String         @map("password_hash") @db.VarChar(255)

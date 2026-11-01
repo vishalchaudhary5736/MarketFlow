@@ -31,6 +31,10 @@ export class S3Service {
         accessKeyId: this.config.getOrThrow<string>('AWS_ACCESS_KEY_ID'),
         secretAccessKey: this.config.getOrThrow('AWS_SECRET_ACCESS_KEY'),
       },
+      // By default the SDK signs a CRC32 of the (empty) body into presigned
+      // PUT URLs, so S3 rejects the real upload with a checksum mismatch.
+      requestChecksumCalculation: 'WHEN_REQUIRED',
+      responseChecksumValidation: 'WHEN_REQUIRED',
     });
   }
 
