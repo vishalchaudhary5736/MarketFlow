@@ -1,10 +1,12 @@
 import {
   Body,
   Controller,
+  Get,
   Headers,
   HttpCode,
   HttpStatus,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -21,12 +23,11 @@ import { TwoFaService } from './two.factor.service';
 import { TwoFaRecoveryDto } from './dto/2fa-recovery.dto';
 import { TwoFaCodeDto } from './dto/two-fa-code.dto';
 import { LogoutDto } from './dto/logout.dto';
-import { Reflector } from '@nestjs/core';
 import type { adminPRequest } from '../shared/shared.types';
 
 const STRICT_LIMIT = { default: { limit: 5, ttl: 60_000 } };
 
-@Controller('admin/auth')
+@Controller('admin')
 @UseGuards(AuthGaurd, RolesGuard)
 // @UseGuards(ThrottlerGuard)
 export class AdminAuthcontroller {
@@ -36,7 +37,7 @@ export class AdminAuthcontroller {
   ) {}
 
   @Public()
-  @Post('login')
+  @Post('auth/login')
   @HttpCode(HttpStatus.OK)
   @Throttle(STRICT_LIMIT)
   loginAdmin(
@@ -48,14 +49,14 @@ export class AdminAuthcontroller {
   }
 
   @TwoFactorStep('2fa_setup')
-  @Post('2fa/setup')
+  @Post('auth/2fa/setup')
   @HttpCode(HttpStatus.OK)
   twofaSetup(@Req() req) {
     return this.twoFaService.twoFaSetup(req.user.sub);
   }
 
   @TwoFactorStep('2fa_setup')
-  @Post('2fa/setup-confirm')
+  @Post('auth/2fa/setup-confirm')
   @HttpCode(HttpStatus.OK)
   @Throttle(STRICT_LIMIT)
   twofaConfirmSetup(
@@ -73,7 +74,7 @@ export class AdminAuthcontroller {
   }
 
   @TwoFactorStep('2fa_verify')
-  @Post('2fa/verify')
+  @Post('auth/2fa/verify')
   @HttpCode(HttpStatus.OK)
   @Throttle(STRICT_LIMIT)
   twofaVerify(
@@ -91,7 +92,7 @@ export class AdminAuthcontroller {
   }
 
   @TwoFactorStep('2fa_verify')
-  @Post('2fa/recovery')
+  @Post('auth/2fa/recovery')
   @Throttle(STRICT_LIMIT)
   twoFaRecovery(
     @Req() req,
@@ -107,7 +108,7 @@ export class AdminAuthcontroller {
     );
   }
 
-  @Post('2fa/reset')
+  @Post('auth/2fa/reset')
   async resetTwoFactor(@Req() req) {
     return this.twoFaService.resetTwoFactor(req.user.sub);
   }

@@ -86,6 +86,7 @@ docker-compose.yml     → runs all 9 services (Redis/Postgres are cloud service
   - `TEMP_TOKEN_TTL` — lifetime of the temporary token between the admin password step and 2FA (default `5m`).
   - `TWO_FACTOR_ENCRYPTION_KEY` — **required** for 2FA: 32 random bytes, base64 (`openssl rand -base64 32`). It encrypts authenticator secrets in the database. Changing it makes existing secrets unreadable.
   - `TWO_FACTOR_ISSUER` — the name shown in the authenticator app (default `E-commerce Admin`).
+- **AWS S3 variables:** `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET`. `S3Service` reads them through `ConfigService` with `getOrThrow`, so if one is missing the auth service stops at startup. `ConfigModule` is registered globally in `SharedModule`.
 
 ## 5. TypeScript configuration
 
@@ -376,6 +377,19 @@ docker compose down           # stop and remove everything
     - The session id comes from the **access token, not the cookie**: the refresh cookie has `path: /auth`, so the browser never sends it to `/admin/auth/*`. The response still clears that cookie, because a `Set-Cookie` may name any path on the same host.
     - Verified: `tsc` is clean. The endpoint was **not** exercised over HTTP.
     - Still open: `AuthGaurd` does not check the session in Redis, so an access token still works after logout until it expires (15 min). The guard should call `getSession(payload.sessionId)` and reject when the session is missing.
+
+32. Started the admin customer-list query shape in [customerlist-dto.ts](apps/auth-service/src/admin/DTO/customerlist-dto.ts): an `email` enum (`ANY`, `NOT_VERIFIED`, `VERIFIED`) for filtering by email verification, used as the type of the `email` field on `customerList`. `customerList` is still a plain `type`, so nothing validates it at runtime yet.
+
+33. Registered `ConfigModule` in [shared.module.ts](apps/auth-service/src/shared/shared.module.ts). `S3Service` ([s3Config.ts](apps/auth-service/src/shared/config/s3Config.ts)) injects `ConfigService`, but `ConfigModule` was never imported anywhere, so Nest could not resolve that dependency and the auth service failed at startup. `SharedModule` now imports `ConfigModule.forRoot({ isGlobal: true, cache: true, envFilePath: join(process.cwd(), '.env') })`. The path is built from the working directory, not `__dirname`, because webpack bundles the service into `dist/`. The service therefore has to be started from the repo root, which `nest start auth-service` and the Docker images already do. It reads the same environment variables that `dotenv/config` loads in `main.ts`.
+    - Verified: `tsc` is clean. The service was not started.
+    - Still open: `S3Service.getUploadUrl` uses `forEach(async ...)`, so it returns before any URL is signed and always gives back `[]`. It should use `await Promise.all(dto.files.map(...))`. The S3 key is `folder/<extension>` only, so every upload with the same extension overwrites the same object. The key needs a unique part, such as a UUID. (Fixed in 34.)
+
+34. Added a 100 MB limit to presigned uploads in [s3Config.ts](apps/auth-service/src/shared/config/s3Config.ts). `getUploadUrl` returns `400` and names every file whose `fileSize` is over `SINGLE_UPLOAD_MAX_BYTES` (100 MB). Larger files would need S3 multipart upload, which is not built yet.
+    - `fileSize` is now required in [shared/dto/presignedUrl.dto.ts](apps/auth-service/src/shared/dto/presignedUrl.dto.ts). The unit is bytes, the same value as the browser's `File.size`.
+    - `fileSize` is passed to S3 as `ContentLength`, so it is signed into the URL. S3 rejects an upload whose body size differs from it, so the client cannot claim a small size and then upload a large file.
+    - Fixed both issues left open in 33. URLs are now signed with `Promise.all(dto.files.map(...))`, so the function waits for them. Keys are `folder/<uuid><ext>`, so uploads no longer overwrite each other.
+    - [users.controller.ts](apps/auth-service/src/users/users.controller.ts) and [users.service.ts](apps/auth-service/src/users/users.service.ts) now import the shared DTO. [users/dto/presignedUrl.dto.ts](apps/auth-service/src/users/dto/presignedUrl.dto.ts) is an identical copy and nothing imports it now, so it can be deleted.
+    - Verified: `tsc` is clean. No URL was generated, and nothing was uploaded to S3.
 
 ## 11. Not set up yet (future work)
 

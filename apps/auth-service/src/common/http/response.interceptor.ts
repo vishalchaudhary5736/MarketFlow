@@ -31,6 +31,35 @@ export class ResponseInterceptor implements NestInterceptor<unknown, unknown> {
 
   constructor(private readonly reflector: Reflector) {}
 
+  private serializeBigInt(value: unknown): unknown {
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((item) => this.serializeBigInt(item));
+    }
+
+    if (value !== null && typeof value === 'object') {
+      if (value instanceof Date) {
+        return value;
+      }
+
+      if (Buffer.isBuffer(value)) {
+        return value;
+      }
+
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [
+          key,
+          this.serializeBigInt(item),
+        ]),
+      );
+    }
+
+    return value;
+  }
+
   intercept(
     context: ExecutionContext,
     next: CallHandler<unknown>,
@@ -67,16 +96,18 @@ export class ResponseInterceptor implements NestInterceptor<unknown, unknown> {
 
         const { message, data, meta } = this.unwrap(payload, declaredMessage);
 
-        return {
+        const response: ApiSuccessResponse = {
           success: true,
           statusCode: res.statusCode,
           message,
-          data,
+          data: data ?? null,
           meta: meta ?? null,
           timestamp: new Date().toISOString(),
           path: req.originalUrl ?? req.url,
           requestId,
-        } satisfies ApiSuccessResponse;
+        };
+
+        return this.serializeBigInt(response);
       }),
     );
   }

@@ -4,10 +4,18 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { CacheModule } from '@nestjs/cache-manager';
 import { createKeyv } from '@keyv/redis';
 import { SharedService } from './shared.service';
+import { S3Service } from './config/s3Config';
+import { ConfigModule } from '@nestjs/config';
+import { join } from 'path';
 
 @Module({
   imports: [
     PrismaModule,
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: join(process.cwd(), '.env'),
+      cache: true,
+    }),
     CacheModule.registerAsync({
       useFactory: () => ({
         stores: [
@@ -27,7 +35,7 @@ import { SharedService } from './shared.service';
       },
     }),
   ],
-  providers: [SharedService],
+  providers: [SharedService, S3Service],
   exports: [PrismaModule, JwtModule, SharedService],
 })
 export class SharedModule {}

@@ -4,6 +4,6 @@ export class TwoFaCodeDto {
   // Six digits from the authenticator app. Kept as a string so leading zeros
   // survive.
   @IsString()
-  @Matches(/^\d{9}$/, { message: 'code must be exactly 9 digits' })
+  @Matches(/^\d{6}$/, { message: 'code must be exactly 6 digits' })
   code: string;
 }

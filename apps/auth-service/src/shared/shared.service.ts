@@ -17,6 +17,8 @@ import { Prisma, UserStatus } from '../../../../generated/prisma/client';
 import { OTP_TYPE } from '../auth/constants.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { generateUniqueValue } from './crypto.util';
+import { S3Service } from './config/s3Config';
+import { PresignedUrlDto } from './dto/presignedUrl.dto';
 
 export interface CachedSession {
   sessionId: string;
@@ -43,7 +45,16 @@ export class SharedService {
   constructor(
     @Inject(CACHE_MANAGER) private readonly cacheService: Cache,
     public readonly prisma: PrismaService,
+    private readonly s3Service: S3Service,
   ) {}
+
+  async getUploadUrl(dto: PresignedUrlDto, userId: string) {
+    return this.s3Service.getUploadUrl(dto, userId);
+  }
+
+  async isValidUrl(key: string) {
+    return this.s3Service.isValidFile(key);
+  }
 
   async cacheSession({
     sessionId,

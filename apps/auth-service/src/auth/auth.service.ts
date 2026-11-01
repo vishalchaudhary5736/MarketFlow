@@ -96,6 +96,8 @@ export class AuthService {
    * refresh cookie is scoped to /auth, so it never reaches /admin/auth.
    */
   async logout(user: JwtPayload, dto: LogoutDto, res: Response) {
+    console.log('DAta==============', dto);
+    console.log('DAta==============', user);
     if (dto.allDevices) {
       await this.sharedService.deleteAllUserSessions(user.sub);
     } else if (user.sessionId) {
@@ -1012,11 +1014,11 @@ export class AuthService {
 
   private isAlreadyVerified(
     otpType: OTP_TYPE,
-    user: Pick<User, 'isEmailVerified' | 'phoneVerifiedAt'>,
+    user: Pick<User, 'isEmailVerified' | 'isMobileVerified'>,
   ): boolean {
     return otpType === OTP_TYPE.EMAIL_VERIFICATION
       ? user.isEmailVerified
-      : user.phoneVerifiedAt !== null;
+      : user.isMobileVerified;
   }
 
   private async markVerified(
@@ -1030,8 +1032,8 @@ export class AuthService {
             data: { isEmailVerified: true, emailVerifiedAt: new Date() },
           })
         : await this.sharedService.prisma.user.updateMany({
-            where: { email, phoneVerifiedAt: null },
-            data: { phoneVerifiedAt: new Date() },
+            where: { email, mobileVerifiedAt: null },
+            data: { mobileVerifiedAt: new Date() },
           });
 
     return count > 0;

@@ -28,4 +28,12 @@ export interface AuthResult extends AuthTokens {
 
 export type adminPRequest = Request & { user: JwtPayload };
 
+export type extendRequest = Request & { user: JwtPayload };
+
 export type UserTableTypes = User;
+
+export type ReturnedPresignedUrl = {
+  fileId: string;
+  key: string;
+  uploadUrl: string;
+};
