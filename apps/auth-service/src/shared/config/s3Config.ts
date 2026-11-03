@@ -87,7 +87,7 @@ export class S3Service {
       await this.s3.send(
         new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
       );
-      return { deleted: true, key };
+      console.log('File deleted successfully.....', key);
     } catch (error) {
       throw new InternalServerErrorException('Failed to delete file from S3');
     }

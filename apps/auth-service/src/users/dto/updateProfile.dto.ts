@@ -1,5 +1,7 @@
 import { Transform } from 'class-transformer';
 import {
+  IsDateString,
+  IsEnum,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -10,6 +12,7 @@ import {
   ValidatorConstraint,
   ValidatorConstraintInterface,
 } from 'class-validator';
+import { Gender } from '../../../../../generated/prisma/enums';
 
 @ValidatorConstraint({ name: 'atLeastOneField', async: false })
 export class AtLeastOneFieldConstraint implements ValidatorConstraintInterface {
@@ -31,9 +34,7 @@ export class UpdateProfile {
 
   @IsOptional()
   @IsString()
-  @Transform(({ value }) => {
-    typeof value === 'string' ? value.trim() : value;
-  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsNotEmpty()
   @Length(9, 15)
   @Matches(/^[0-9]+$/, {
@@ -44,33 +45,36 @@ export class UpdateProfile {
   @IsOptional()
   @IsString()
   @IsNotEmpty()
-  @Transform(({ value }) => {
-    typeof value === 'string' ? value.trim() : value;
-  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @Length(1, 5)
   countryCode?: string;
 
   @IsOptional()
-  @Transform(({ value }) => {
-    typeof value === 'string' ? value.trim() : value;
-  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty()
   firstName?: string;
 
   @IsOptional()
-  @Transform(({ value }) => {
-    typeof value === 'string' ? value.trim() : value;
-  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty()
   lastName?: string;
 
   @IsOptional()
-  @Transform(({ value }) => {
-    typeof value === 'string' ? value.trim() : value;
-  })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @IsNotEmpty()
   avatarUrl?: string;
+
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'dob must be in YYYY-MM-DD format',
+  })
+  @IsDateString({ strict: true })
+  dob?: string;
+
+  @IsOptional()
+  @IsEnum(Gender, { message: 'Gender must be Male or Female.' })
+  gender?: Gender;
 }

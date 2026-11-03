@@ -48,9 +48,14 @@ export class UsersService {
       key = userDetail?.avatarUrl ? userDetail.avatarUrl : null;
     }
 
+    const { dob, ...rest } = dto;
+
     const result = await this.sharedService.prisma.user.update({
       where: { id: userId },
-      data: dto,
+      data: {
+        ...rest,
+        ...(dob && { dob: new Date(dob) }),
+      },
       omit: {
         passwordHash: true,
         failedLoginAttempts: true,
@@ -60,14 +65,17 @@ export class UsersService {
     });
 
     // TO-DO
-    if (key) {
+    if (key && key !== dto.avatarUrl) {
+      this.sharedService
+        .deleteFileFromS3(key)
+        .catch((error) => console.error('S3 Delete Error:', error));
     }
 
     return {
       success: true,
       message: 'Profile updated successfully.',
       data: {
-        userDetail: result,
+        ...result,
       },
     };
   }

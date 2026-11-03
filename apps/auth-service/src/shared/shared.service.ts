@@ -53,7 +53,19 @@ export class SharedService {
   }
 
   async isValidUrl(key: string) {
+    // HeadObject takes the object key, not the public URL.
     return this.s3Service.isValidFile(key);
+  }
+
+  deleteFileFromS3(key: string) {
+    return this.s3Service.deleteFile(key);
+  }
+
+  getS3Url(key?: string | null) {
+    if (!key) return '';
+    if (key.startsWith('http')) return key;
+    const base = process.env.S3_BASE_URL;
+    return `${base}${key}`;
   }
 
   async cacheSession({

@@ -403,6 +403,15 @@ docker compose down           # stop and remove everything
 37. Removed checksum parameters from presigned upload URLs in [s3Config.ts](apps/auth-service/src/shared/config/s3Config.ts). With its default settings, `@aws-sdk/client-s3` (3.1152) computed a CRC32 checksum for `PutObject` while signing. No body existed at that point, so it signed the checksum of an **empty** body into the URL (`x-amz-checksum-crc32`, `x-amz-sdk-checksum-algorithm`). S3 would then reject the real browser upload because its checksum did not match. The `S3Client` now sets `requestChecksumCalculation: 'WHEN_REQUIRED'` and `responseChecksumValidation: 'WHEN_REQUIRED'`, so it adds checksums only when an operation requires them.
     - Verified: `tsc` is clean. No URL was generated, and nothing was uploaded.
 
+38. Fixed `POST /users/update-profile` returning `400 INVALID_REQUEST_DATA`.
+    - The cause was `dob`. [UpdateProfile](apps/auth-service/src/users/dto/updateProfile.dto.ts) correctly validates it as a `YYYY-MM-DD` string. But [users.service.ts](apps/auth-service/src/users/users.service.ts) passed the DTO straight to Prisma, which rejects a date with no time part for a `DateTime` field and throws `PrismaClientValidationError`. The global filter maps that error to `400 INVALID_REQUEST_DATA`. `updateProfile` now sends `dob: new Date(dob)`. That is midnight UTC, so the `@db.Date` column stores exactly that day.
+    - Fixed all five `@Transform` decorators in `UpdateProfile`. Their bodies were wrapped in `{ }` with no `return`, so `mobileNumber`, `countryCode`, `firstName`, `lastName` and `avatarUrl` became `undefined` and were silently left out of the update. They now return the trimmed value.
+    - `gender` uses the `Gender` enum (`Male`, `Female`; migration `20261101185323_added_gender_profile`), and the DTO checks it with `@IsEnum(Gender)`.
+    - Verified: `tsc` is clean. The endpoint was not called over HTTP.
+
+39. Fixed `update-profile` returning "File does not exist in S3" for files that do exist. `SharedService.isValidUrl` in [shared.service.ts](apps/auth-service/src/shared/shared.service.ts) passed `getS3Url(key)` (the full `https://<bucket>.s3...amazonaws.com/...` URL) to `HeadObjectCommand` as the `Key`. No object has that name, so S3 returned 404. It now passes the key itself (`profile/<userId>/<uuid>.<ext>`). The debug `console.log` was removed.
+    - Verified: `tsc` is clean. The endpoint was not called over HTTP.
+
 ## 11. Not set up yet (future work)
 
 - Redis Cloud / Neon credentials are currently committed only to your local `.env` (correctly gitignored) — if this project gets a real deployment pipeline, these need to move to a proper secrets manager rather than living in a plain `.env` file on someone's machine.
